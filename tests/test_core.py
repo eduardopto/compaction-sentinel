@@ -10,7 +10,6 @@ from compaction_sentinel.core import (
     build_resume_packet,
     connect,
     handle_hook,
-    loop_warnings,
     project_from_payload,
     redact_text,
     save_checkpoint,
@@ -37,6 +36,7 @@ class CoreTests(unittest.TestCase):
             checkpoint = active_checkpoint(db, project_from_payload(payload))
             self.assertIsNotNone(checkpoint)
             self.assertIn("continuity package", checkpoint["objective"])
+            db.close()
 
     def test_loop_warning_after_repeated_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -80,6 +80,30 @@ class CoreTests(unittest.TestCase):
             packet = build_resume_packet(db, payload_project)
             self.assertIn("Finish device install verification", packet)
             self.assertIn("Install on phone", packet)
+            db.close()
+
+    def test_complete_checkpoint_closes_active_work(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            payload_project = project_from_payload({"cwd": str(project)})
+            db = connect(home)
+            save_checkpoint(db, payload_project, objective="Ship the thing")
+            self.assertIsNotNone(active_checkpoint(db, payload_project))
+            save_checkpoint(db, payload_project, objective="Ship the thing", status="complete")
+            self.assertIsNone(active_checkpoint(db, payload_project))
+            db.close()
+
+    def test_stop_hook_noop_returns_empty_json(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            out = handle_hook("Stop", {"cwd": str(project), "last_assistant_message": "Done."}, codex_home=home)
+            self.assertEqual(out, {})
 
 
 if __name__ == "__main__":

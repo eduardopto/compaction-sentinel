@@ -1,0 +1,20 @@
+{
+  "name": "compaction-sentinel-local",
+  "interface": {
+    "displayName": "Compaction Sentinel Local"
+  },
+  "plugins": [
+    {
+      "name": "compaction-sentinel",
+      "source": {
+        "source": "local",
+        "path": "./"
+      },
+      "policy": {
+        "installation": "AVAILABLE",
+        "authentication": "ON_INSTALL"
+      },
+      "category": "Productivity"
+    }
+  ]
+}

@@ -19,4 +19,5 @@ Runtime code must stay dependency-free unless there is a strong reason. Hooks ne
 - Keep secret redaction intact.
 - Verify `make test`.
 - Verify a hook smoke command from `docs/VERIFICATION.md`.
+- Verify a temp macOS install smoke from `docs/VERIFICATION.md`.
 - Avoid storing full transcripts or unbounded tool output.

@@ -18,9 +18,11 @@ Hooks run at the hard boundaries:
 - `PostToolUse`: record outcomes and warn when a failed pattern repeats.
 - `Stop`: record turn end and optionally continue active work.
 
+The hook CLI is fail-open: unexpected exceptions are logged and return `{}` so Codex work is not blocked by Sentinel.
+
 3. SQLite Ledger
 
-The ledger is local, durable, and compact. It stores events, checkpoints, and notes per project root.
+The ledger is local, durable, and compact. It stores events, checkpoints, and notes per project root. New active checkpoints supersede older active checkpoints, and complete checkpoints close active work for that project.
 
 4. MCP Server
 
@@ -33,6 +35,7 @@ MCP tools let Codex explicitly write and query continuity state when available. 
 - The package does not store full transcripts.
 - The package redacts obvious secrets before storing text.
 - Forced continuation is opt-in.
+- Installer writes are backed up and atomic where possible.
 
 ## Failure Modes Covered
 

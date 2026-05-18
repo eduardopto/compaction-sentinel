@@ -15,11 +15,12 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "0.1.0"
+VERSION = "0.2.0"
 APP_NAME = "Compaction Sentinel"
 DEFAULT_MAX_PACKET_CHARS = 9000
 DEFAULT_LOOP_THRESHOLD = 3
 DEFAULT_RECENT_EVENT_LIMIT = 18
+DEFAULT_MAX_EVENTS_PER_PROJECT = 1200
 SENSITIVE_VALUE = "[redacted]"
 
 
@@ -61,6 +62,7 @@ def load_runtime_config(codex_home: Path | None = None) -> dict[str, Any]:
         "loop_threshold": DEFAULT_LOOP_THRESHOLD,
         "auto_continue": "off",
         "stop_continue_max_per_turn": 1,
+        "max_events_per_project": DEFAULT_MAX_EVENTS_PER_PROJECT,
         "redact": True,
     }
     if not path.exists():
@@ -95,7 +97,7 @@ def log(message: str, codex_home: Path | None = None) -> None:
 def connect(codex_home: Path | None = None) -> sqlite3.Connection:
     path = db_path(codex_home)
     path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path)
+    db = sqlite3.connect(path, timeout=2.0)
     db.row_factory = sqlite3.Row
     init_db(db)
     return db
@@ -163,6 +165,13 @@ def init_db(db: sqlite3.Connection) -> None:
         );
         """
     )
+    existing_columns = {
+        str(row["name"])
+        for row in db.execute("PRAGMA table_info(checkpoints)").fetchall()
+    }
+    if "completed_at" not in existing_columns:
+        db.execute("ALTER TABLE checkpoints ADD COLUMN completed_at TEXT")
+    db.execute("PRAGMA busy_timeout=2000;")
     db.commit()
 
 
@@ -398,9 +407,40 @@ def record_event(
         ),
     )
     db.commit()
+    prune_events(db, project)
     row = db.execute("SELECT * FROM events WHERE id = last_insert_rowid()").fetchone()
     assert row is not None
     return row
+
+
+def prune_events(
+    db: sqlite3.Connection,
+    project: Project,
+    *,
+    max_events: int = DEFAULT_MAX_EVENTS_PER_PROJECT,
+) -> None:
+    if max_events <= 0:
+        return
+    row = db.execute(
+        "SELECT COUNT(*) AS count FROM events WHERE project_root = ?",
+        (str(project.root),),
+    ).fetchone()
+    if not row or int(row["count"]) <= max_events:
+        return
+    db.execute(
+        """
+        DELETE FROM events
+        WHERE project_root = ?
+          AND id NOT IN (
+            SELECT id FROM events
+            WHERE project_root = ?
+            ORDER BY id DESC
+            LIMIT ?
+          )
+        """,
+        (str(project.root), str(project.root), max_events),
+    )
+    db.commit()
 
 
 def infer_objective(prompt: str) -> str | None:
@@ -438,21 +478,34 @@ def save_checkpoint(
     session_id: str = "",
     turn_id: str = "",
 ) -> int:
+    clean_objective = normalize_text(objective, 1400)
+    if not clean_objective:
+        raise ValueError("checkpoint objective is required")
     now = utc_now()
+    clean_status = normalize_text(status, 80) or "active"
+    close_status = "complete" if clean_status == "complete" else "superseded"
+    db.execute(
+        """
+        UPDATE checkpoints
+        SET status = ?, completed_at = COALESCE(completed_at, ?), updated_at = ?
+        WHERE project_root = ? AND status IN ('active', 'blocked')
+        """,
+        (close_status, now, now, str(project.root)),
+    )
     db.execute(
         """
         INSERT INTO checkpoints
           (project_root, project_name, session_id, turn_id, status, objective,
-           current_step, next_action, blockers, evidence, source, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+           current_step, next_action, blockers, evidence, source, created_at, updated_at, completed_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(project.root),
             project.name,
             session_id,
             turn_id,
-            status,
-            normalize_text(objective, 1400),
+            clean_status,
+            clean_objective,
             normalize_text(current_step, 1400),
             normalize_text(next_action, 1400),
             normalize_text(blockers, 1400),
@@ -460,6 +513,7 @@ def save_checkpoint(
             source,
             now,
             now,
+            now if clean_status == "complete" else None,
         ),
     )
     db.commit()
@@ -521,6 +575,9 @@ def save_note(
     surface_condition: str = "",
     status: str = "open",
 ) -> int:
+    clean_content = normalize_text(content, 3000)
+    if not clean_content:
+        raise ValueError("note content is required")
     now = utc_now()
     db.execute(
         """
@@ -532,7 +589,7 @@ def save_note(
             str(project.root),
             project.name,
             status,
-            normalize_text(content, 3000),
+            clean_content,
             normalize_text(surface_condition, 1000),
             now,
             now,
@@ -736,8 +793,20 @@ def maybe_stop_continue(
 
 
 def handle_hook(event_name: str, payload: dict[str, Any], codex_home: Path | None = None) -> dict[str, Any]:
-    config = load_runtime_config(codex_home)
     db = connect(codex_home)
+    try:
+        return _handle_hook(event_name, payload, db, codex_home)
+    finally:
+        db.close()
+
+
+def _handle_hook(
+    event_name: str,
+    payload: dict[str, Any],
+    db: sqlite3.Connection,
+    codex_home: Path | None = None,
+) -> dict[str, Any]:
+    config = load_runtime_config(codex_home)
     project = project_from_payload(payload)
     event_name = event_name or str(payload.get("hook_event_name") or "")
     loop_threshold = int(config.get("loop_threshold") or DEFAULT_LOOP_THRESHOLD)
@@ -850,7 +919,7 @@ def handle_hook(event_name: str, payload: dict[str, Any], codex_home: Path | Non
         continuation = maybe_stop_continue(db, project, payload, config)
         if continuation:
             return continuation
-        return {"continue": True}
+        return {}
 
     record_event(
         db,
@@ -890,4 +959,5 @@ def search_events(
 
 
 def project_from_cli(cwd: str | None = None) -> Project:
-    return Project(root=find_project_root(Path(cwd or os.getcwd())), name=find_project_root(Path(cwd or os.getcwd())).name)
+    root = find_project_root(Path(cwd or os.getcwd()))
+    return Project(root=root, name=root.name or "workspace")

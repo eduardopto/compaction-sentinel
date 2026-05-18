@@ -7,6 +7,8 @@ description: Preserve active Codex Desktop work across compaction, resumes, long
 
 Use this skill when the user needs Codex to survive compaction or resume a long-running task without forgetting the live process.
 
+When Compaction Sentinel is installed, hooks should already inject a resume packet automatically. The skill is extra behavior guidance, not the only activation path.
+
 ## Operating Rules
 
 1. Treat the latest Compaction Sentinel packet, current files, and explicit user acceptance criteria as the resume authority.
@@ -15,6 +17,7 @@ Use this skill when the user needs Codex to survive compaction or resume a long-
 4. Write a checkpoint whenever the current step, next action, blocker, acceptance criteria, or verified evidence changes.
 5. Keep checkpoints factual and compact: objective, current step, next action, blockers, evidence.
 6. If the packet and repository disagree, verify the repository and update the checkpoint.
+7. Do not treat a loop warning as proof of failure; inspect the latest concrete output and then choose a different hypothesis.
 
 ## MCP Tools
 
@@ -35,6 +38,7 @@ cs checkpoint --objective "..." --current-step "..." --next-action "..." --evide
 cs note "..." --when "..."
 cs packet
 cs status
+cs doctor
 ```
 
 ## Checkpoint Quality

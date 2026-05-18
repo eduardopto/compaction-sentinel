@@ -5,7 +5,7 @@ Compaction Sentinel is designed for Codex Desktop on macOS.
 ## Requirements
 
 - macOS with Codex Desktop installed.
-- `python3` available from Terminal.
+- Python 3.11 or newer available from Terminal.
 - Codex hooks enabled. The installer ensures `hooks = true` in `~/.codex/config.toml`.
 
 ## Install
@@ -13,6 +13,8 @@ Compaction Sentinel is designed for Codex Desktop on macOS.
 From the repository:
 
 ```bash
+git clone https://github.com/eduardopto/compaction-sentinel.git
+cd compaction-sentinel
 python3 scripts/install.py
 ```
 
@@ -24,6 +26,12 @@ The installer writes:
 - `~/.codex/skills/compaction-sentinel` skill copy.
 - `~/.agents/skills/compaction-sentinel` skill copy.
 - `~/.codex/bin/cs` and `~/.codex/bin/compaction-sentinel` command shims.
+
+Before changing `~/.codex/hooks.json` or `~/.codex/config.toml`, the installer writes timestamped backups under:
+
+```bash
+~/.codex/backups/compaction-sentinel/
+```
 
 If `~/.codex/bin` is not on your shell path, use the full command path:
 
@@ -43,6 +51,33 @@ codex mcp list
 ```
 
 You should see `compaction_sentinel` in the MCP list.
+
+`doctor` should return `"ok": true`. If it does not, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
+
+## Update
+
+Pull the latest repository changes, then rerun the installer:
+
+```bash
+git pull
+python3 scripts/install.py
+```
+
+## Auto-Continue Policy
+
+The default is safe mode:
+
+```bash
+python3 scripts/install.py --auto-continue off
+```
+
+For long unattended runs:
+
+```bash
+python3 scripts/install.py --auto-continue gentle
+```
+
+`gentle` asks Codex to continue only when an active checkpoint exists and the last message does not look complete. `strict` is more aggressive and should be used carefully.
 
 ## Uninstall
 

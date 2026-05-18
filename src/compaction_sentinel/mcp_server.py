@@ -185,6 +185,8 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
         send(error(req.get("id"), -32602, f"Unknown tool: {name}"))
     except Exception as exc:
         send(error(req.get("id"), -32000, str(exc)))
+    finally:
+        db.close()
 
 
 def loop(codex_home: Path | None = None) -> int:

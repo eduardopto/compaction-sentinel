@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.2.0
+
+- Hardens macOS installer with backups, atomic writes, environment checks, safer TOML output, and richer `doctor` diagnostics.
+- Fixes checkpoint lifecycle so completing or replacing work closes older active checkpoints.
+- Makes hooks fail open on runtime errors instead of disrupting Codex work.
+- Uses an empty Stop-hook response for no-op stops and keeps continuation explicitly opt-in.
+- Adds clearer GitHub documentation for automatic hooks, optional skill use, MCP tools, limitations, troubleshooting, and verification.
+
 ## 0.1.0
 
 - Initial public release.

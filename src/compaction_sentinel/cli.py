@@ -17,6 +17,7 @@ from .core import (
     connect,
     default_codex_home,
     handle_hook,
+    log,
     project_from_cli,
     read_json_stdin,
     recent_events,
@@ -37,7 +38,13 @@ def build_parser() -> argparse.ArgumentParser:
     sub = parser.add_subparsers(dest="command", required=True)
 
     install = sub.add_parser("install", help="Install hooks, skill, CLI shims, and MCP config into Codex Desktop.")
-    install.add_argument("--enable-stop-continue", action="store_true", help="Opt into Stop-hook continuations for active checkpoints.")
+    install.add_argument("--enable-stop-continue", action="store_true", help="Shortcut for --auto-continue gentle.")
+    install.add_argument(
+        "--auto-continue",
+        choices=["off", "gentle", "strict"],
+        default=None,
+        help="Stop-hook continuation policy. Defaults to preserving the current setting, or off on first install.",
+    )
     install.add_argument("--skills-target", choices=["codex", "agents", "both"], default="both", help="Where to copy the skill.")
     install.add_argument("--dry-run", action="store_true", help="Show what would change without writing files.")
 
@@ -87,6 +94,7 @@ def main(argv: list[str] | None = None) -> int:
             source_root=Path(__file__).resolve().parents[2],
             codex_home=codex_home,
             enable_stop_continue=args.enable_stop_continue,
+            auto_continue=args.auto_continue,
             skills_target=args.skills_target,
             dry_run=args.dry_run,
         )
@@ -105,44 +113,60 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "hook":
         payload = read_json_stdin()
-        safe_print_json(handle_hook(args.event_name, payload, codex_home=codex_home))
+        try:
+            safe_print_json(handle_hook(args.event_name, payload, codex_home=codex_home))
+        except Exception as exc:
+            log(f"hook {args.event_name} failed open: {exc}", codex_home)
+            safe_print_json({})
         return 0
 
     if args.command == "checkpoint":
         db = connect(codex_home)
         project = project_from_cli(args.cwd)
-        checkpoint_id = save_checkpoint(
-            db,
-            project,
-            objective=args.objective,
-            status=args.status,
-            current_step=args.current_step,
-            next_action=args.next_action,
-            blockers=args.blockers,
-            evidence=args.evidence,
-            source="cli",
-        )
+        try:
+            checkpoint_id = save_checkpoint(
+                db,
+                project,
+                objective=args.objective,
+                status=args.status,
+                current_step=args.current_step,
+                next_action=args.next_action,
+                blockers=args.blockers,
+                evidence=args.evidence,
+                source="cli",
+            )
+        finally:
+            db.close()
         print(f"Saved checkpoint #{checkpoint_id} for {project.name}.")
         return 0
 
     if args.command == "note":
         db = connect(codex_home)
         project = project_from_cli(args.cwd)
-        note_id = save_note(db, project, args.content, surface_condition=args.surface_condition)
+        try:
+            note_id = save_note(db, project, args.content, surface_condition=args.surface_condition)
+        finally:
+            db.close()
         print(f"Saved note #{note_id} for {project.name}.")
         return 0
 
     if args.command == "packet":
         db = connect(codex_home)
         project = project_from_cli(args.cwd)
-        print(build_resume_packet(db, project, reason="cli", max_chars=args.max_chars))
+        try:
+            print(build_resume_packet(db, project, reason="cli", max_chars=args.max_chars))
+        finally:
+            db.close()
         return 0
 
     if args.command == "status":
         db = connect(codex_home)
         project = project_from_cli(args.cwd)
-        checkpoint = active_checkpoint(db, project)
-        events = recent_events(db, project, limit=5)
+        try:
+            checkpoint = active_checkpoint(db, project)
+            events = recent_events(db, project, limit=5)
+        finally:
+            db.close()
         print(
             json.dumps(
                 {
@@ -161,7 +185,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "search":
         db = connect(codex_home)
         project = project_from_cli(args.cwd)
-        rows = search_events(db, project, args.query, limit=args.limit)
+        try:
+            rows = search_events(db, project, args.query, limit=args.limit)
+        finally:
+            db.close()
         for row in rows:
             print(f"[{row['id']}] {row['created_at']} {row['event_name']}/{row['kind']}: {row['summary']}")
         return 0
