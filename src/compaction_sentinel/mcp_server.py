@@ -10,6 +10,7 @@ from typing import Any
 from .core import (
     VERSION,
     active_checkpoint,
+    append_checkpoint_field,
     build_resume_packet,
     connect,
     project_from_cli,
@@ -20,22 +21,66 @@ from .core import (
 )
 
 
+CHECKPOINT_PROPERTIES: dict[str, Any] = {
+    "objective": {"type": "string"},
+    "status": {"type": "string", "enum": ["active", "blocked", "complete"], "default": "active"},
+    "acceptance_criteria": {"type": "string"},
+    "current_step": {"type": "string"},
+    "next_action": {"type": "string"},
+    "blockers": {"type": "string"},
+    "evidence": {"type": "string"},
+    "files_touched": {"type": "string"},
+    "commands_run": {"type": "string"},
+    "tests_passed": {"type": "string"},
+    "tests_failed": {"type": "string"},
+    "decisions_made": {"type": "string"},
+    "assumptions": {"type": "string"},
+    "do_not_repeat": {"type": "string"},
+    "last_verified_at": {"type": "string"},
+    "confidence": {"type": "string"},
+    "cwd": {"type": "string"},
+}
+
+
 TOOLS = [
     {
         "name": "compaction_checkpoint",
-        "description": "Save a durable checkpoint with the current objective, current step, next action, blockers, and evidence.",
+        "description": "Save a durable checkpoint with objective, acceptance criteria, state, next action, evidence, decisions, and do-not-repeat guidance.",
+        "inputSchema": {
+            "type": "object",
+            "properties": CHECKPOINT_PROPERTIES,
+            "required": ["objective"],
+        },
+    },
+    {
+        "name": "compaction_evidence_add",
+        "description": "Append evidence, command output, tests, or touched files to the active checkpoint.",
         "inputSchema": {
             "type": "object",
             "properties": {
+                "content": {"type": "string"},
+                "kind": {
+                    "type": "string",
+                    "enum": ["evidence", "commands_run", "tests_passed", "tests_failed", "files_touched"],
+                    "default": "evidence",
+                },
                 "objective": {"type": "string"},
-                "status": {"type": "string", "enum": ["active", "blocked", "complete"], "default": "active"},
-                "current_step": {"type": "string"},
-                "next_action": {"type": "string"},
-                "blockers": {"type": "string"},
-                "evidence": {"type": "string"},
                 "cwd": {"type": "string"},
             },
-            "required": ["objective"],
+            "required": ["content"],
+        },
+    },
+    {
+        "name": "compaction_avoid_add",
+        "description": "Append a do-not-repeat item to the active checkpoint.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "content": {"type": "string"},
+                "objective": {"type": "string"},
+                "cwd": {"type": "string"},
+            },
+            "required": ["content"],
         },
     },
     {
@@ -53,7 +98,7 @@ TOOLS = [
     },
     {
         "name": "compaction_packet",
-        "description": "Return the current resume packet for the active project.",
+        "description": "Return the current packet-v2 resume brief for the active project.",
         "inputSchema": {
             "type": "object",
             "properties": {
@@ -126,13 +171,43 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
                 project,
                 objective=str(args.get("objective") or ""),
                 status=str(args.get("status") or "active"),
+                acceptance_criteria=str(args.get("acceptance_criteria") or ""),
                 current_step=str(args.get("current_step") or ""),
                 next_action=str(args.get("next_action") or ""),
                 blockers=str(args.get("blockers") or ""),
                 evidence=str(args.get("evidence") or ""),
+                files_touched=str(args.get("files_touched") or ""),
+                commands_run=str(args.get("commands_run") or ""),
+                tests_passed=str(args.get("tests_passed") or ""),
+                tests_failed=str(args.get("tests_failed") or ""),
+                decisions_made=str(args.get("decisions_made") or ""),
+                assumptions=str(args.get("assumptions") or ""),
+                do_not_repeat=str(args.get("do_not_repeat") or ""),
+                last_verified_at=str(args.get("last_verified_at") or ""),
+                confidence=str(args.get("confidence") or ""),
                 source="mcp",
             )
             send(result(req.get("id"), f"Saved Compaction Sentinel checkpoint #{checkpoint_id} for {project.name}."))
+            return
+        if name == "compaction_evidence_add":
+            checkpoint_id = append_checkpoint_field(
+                db,
+                project,
+                field=str(args.get("kind") or "evidence"),
+                value=str(args.get("content") or ""),
+                objective=str(args.get("objective") or "") or None,
+            )
+            send(result(req.get("id"), f"Updated Compaction Sentinel checkpoint #{checkpoint_id} for {project.name}."))
+            return
+        if name == "compaction_avoid_add":
+            checkpoint_id = append_checkpoint_field(
+                db,
+                project,
+                field="do_not_repeat",
+                value=str(args.get("content") or ""),
+                objective=str(args.get("objective") or "") or None,
+            )
+            send(result(req.get("id"), f"Updated Compaction Sentinel checkpoint #{checkpoint_id} for {project.name}."))
             return
         if name == "compaction_note":
             note_id = save_note(

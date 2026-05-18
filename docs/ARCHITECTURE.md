@@ -1,20 +1,21 @@
 # Architecture
 
-Compaction Sentinel is intentionally simple: write down the live state before the model forgets it, then make that state visible at resume time.
+Compaction Sentinel is intentionally small: record the live state before the model can lose it, then expose that state at resume time in a compact operating brief.
 
 ## Layers
 
 1. Skill
 
-The skill teaches Codex how to use checkpoints and how to behave after compaction. It is not enough by itself because it only works when the agent remembers to load it.
+The skill teaches Codex how to behave after compaction. It is not sufficient by itself because it depends on Codex deciding to load it.
 
 2. Hooks
 
-Hooks run at the hard boundaries:
+Hooks run at lifecycle boundaries:
 
-- `SessionStart`: inject the latest resume packet.
-- `UserPromptSubmit`: record the new prompt, infer fresh goals, inject the packet.
-- `PreToolUse`: record planned tool actions and warn on repeated loops.
+- `SessionStart`: inject latest packet.
+- `UserPromptSubmit`: record prompt, infer fresh goals, inject packet.
+- `PreToolUse`: record planned tool actions and warn on loops.
+- `PermissionRequest`: record approval context and repeated approval requests without deciding for the user.
 - `PostToolUse`: record outcomes and warn when a failed pattern repeats.
 - `Stop`: record turn end and optionally continue active work.
 
@@ -22,32 +23,60 @@ The hook CLI is fail-open: unexpected exceptions are logged and return `{}` so C
 
 3. SQLite Ledger
 
-The ledger is local, durable, and compact. It stores events, checkpoints, and notes per project root. New active checkpoints supersede older active checkpoints, and complete checkpoints close active work for that project.
+The ledger is local, durable, and compact. It stores events, checkpoints, notes, and small state keys per project root.
 
-4. MCP Server
+New active checkpoints supersede older active checkpoints. Complete checkpoints close active work for that project.
 
-MCP tools let Codex explicitly write and query continuity state when available. The hooks still work if MCP is unavailable.
+4. Packet Builder
+
+Packet v2 turns ledger state into a ranked brief:
+
+- Authority.
+- Project.
+- Active objective.
+- Acceptance criteria.
+- Current state.
+- Next action.
+- Blockers.
+- Evidence.
+- Do-not-repeat.
+- Continuity notes.
+- Recent event trail.
+- Resume contract.
+
+5. MCP Server
+
+MCP tools let Codex explicitly write and query continuity state when available. Hooks still work if MCP is unavailable.
+
+6. CLI
+
+The CLI is both user-facing and hook-facing. User commands manage checkpoints, evidence, avoid items, scrub/export, retention, config, backups, install repair, and uninstall.
 
 ## Design Boundaries
 
-- The package does not claim to control server-side compaction.
-- The package does not trust stale packets over current files.
-- The package does not store full transcripts.
-- The package redacts obvious secrets before storing text.
-- Forced continuation is opt-in.
-- Installer writes are backed up and atomic where possible.
+- Sentinel does not control server-side compaction.
+- Sentinel does not advertise itself as a security boundary.
+- Sentinel does not store full transcripts by default.
+- Sentinel redacts secrets before storing hook text by default.
+- Stop continuation is opt-in and capped.
+- Installer writes are backed up and atomic where practical.
+- Plugin packaging exists, but user-level hooks are the reliable install path today.
 
 ## Failure Modes Covered
 
 - Agent resumes from the last user message and forgets work from minutes ago.
-- Agent repeats the same command/fix/test loop.
+- Agent repeats the same command, failure, or investigation loop.
+- Agent asks for the same risky permission repeatedly.
 - Agent loses acceptance criteria after compaction.
+- Agent claims completion after a failing tool result.
 - Goal UI survives while work effectively stops.
 - A new thread starts in the same project without the old investigation packet.
+- Two projects write checkpoints without bleeding state into each other.
 
 ## Failure Modes Not Fully Solved
 
 - If hooks are disabled or not trusted, only the skill/plugin layer remains.
-- If Codex changes hook schemas, the handler falls back to best-effort extraction.
-- If the agent ignores injected context, the user may still need to ask it to use the skill.
-- If a task has no checkpoint and no useful prompt history, the packet can only preserve recent hook events.
+- If Codex changes hook schemas, Sentinel falls back to best-effort extraction.
+- If the agent ignores injected context, the user may still need to ask it to use the skill or inspect `cs packet`.
+- If a task has no checkpoint and no useful hook history, the packet can only preserve recent events.
+- Hook coverage is not complete for every possible tool path, so warnings are a continuity guardrail rather than complete enforcement.

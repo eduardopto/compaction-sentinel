@@ -1,0 +1,4 @@
+{"checkpoint":{"cwd":"$PROJECT","objective":"Ship the verified build","current_step":"Build passed; install is next.","next_action":"Install on the phone.","evidence":"make test passed","tests_passed":"make test passed"}}
+{"event":"PostToolUse","payload":{"cwd":"$PROJECT","session_id":"s1","turn_id":"t1","tool_use_id":"post-fail","tool_name":"Bash","tool_input":{"command":"make install-device"},"tool_response":{"exit_code":2,"stderr":"error: phone is locked"}}}
+{"event":"Stop","payload":{"cwd":"$PROJECT","session_id":"s1","turn_id":"t1","last_assistant_message":"Done, the install is complete."}}
+{"assert":{"cwd":"$PROJECT","packet_contains":["Tool-output blindness risk","phone is locked","Install on the phone."],"max_chars":9000}}

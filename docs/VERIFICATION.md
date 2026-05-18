@@ -7,10 +7,30 @@ This file records the checks expected before release.
 ```bash
 make compile
 make test
-PYTHONPATH=src python3 -m compaction_sentinel.cli --codex-home /tmp/cs-home doctor
+make replay
 ```
 
-Expected: tests pass and `doctor` returns JSON. Before install into a temp home, `ok` may be false because runtime files are not present yet.
+Expected: compile succeeds, unit tests pass, and all replay fixtures pass.
+
+## Replay Evals
+
+Replay fixtures live in `tests/fixtures/scenarios/`:
+
+- `stale_restart_after_compaction.jsonl`
+- `repeated_test_failure_loop.jsonl`
+- `objective_changed_midstream.jsonl`
+- `tool_result_regression.jsonl`
+- `sensitive_token_redaction.jsonl`
+- `project_switching.jsonl`
+- `stop_auto_continue_loop.jsonl`
+
+Run one scenario:
+
+```bash
+python3 scripts/replay_hooks.py tests/fixtures/scenarios/stale_restart_after_compaction.jsonl
+```
+
+The harness asserts objective preservation, next action preservation, loop warnings, redaction, packet budget, project isolation, and Stop continuation caps.
 
 ## Hook Smoke
 
@@ -19,7 +39,16 @@ printf '{"cwd":"%s","session_id":"smoke","turn_id":"t1","prompt":"set goal: veri
   | PYTHONPATH=src python3 -m compaction_sentinel.cli --codex-home /tmp/cs-home hook UserPromptSubmit
 ```
 
-Expected: JSON with `hookSpecificOutput.additionalContext` containing a `<compaction-sentinel ...>` packet.
+Expected: JSON with `hookSpecificOutput.additionalContext` containing a packet-v2 `<compaction-sentinel ...>` block.
+
+## PermissionRequest Smoke
+
+```bash
+printf '{"cwd":"%s","session_id":"smoke","turn_id":"t1","tool_use_id":"approval-1","tool_name":"Bash","tool_input":{"command":"rm -rf build","description":"cleanup"}}' "$PWD" \
+  | PYTHONPATH=src python3 -m compaction_sentinel.cli --codex-home /tmp/cs-home hook PermissionRequest
+```
+
+Expected: `{}` unless the same request repeats. Sentinel records the request but does not approve or deny it.
 
 ## MCP Smoke
 
@@ -30,13 +59,13 @@ printf '%s\n' \
   | PYTHONPATH=src python3 -m compaction_sentinel.cli --codex-home /tmp/cs-home mcp
 ```
 
-Expected: initialize response and tools including `compaction_checkpoint`.
+Expected: initialize response and tools including `compaction_checkpoint`, `compaction_evidence_add`, and `compaction_avoid_add`.
 
 ## macOS Install Smoke
 
 ```bash
 rm -rf /tmp/compaction-sentinel-install
-python3 scripts/install.py --codex-home /tmp/compaction-sentinel-install --skills-target codex
+python3 scripts/install.py --codex-home /tmp/compaction-sentinel-install --skills-target codex --doctor
 /tmp/compaction-sentinel-install/bin/cs --codex-home /tmp/compaction-sentinel-install doctor
 ```
 
@@ -45,8 +74,8 @@ Expected: `"ok": true`, runtime exists, hooks are present for all events, MCP co
 ## Real Codex Install Smoke
 
 ```bash
-python3 scripts/install.py
-~/.codex/bin/cs doctor
+python3 scripts/install.py --doctor
+~/.codex/bin/cs doctor --explain
 codex mcp list
 ```
 
@@ -59,4 +88,4 @@ rm -rf /tmp/compaction-sentinel-wheel
 python3 -m pip wheel . -w /tmp/compaction-sentinel-wheel
 ```
 
-Expected: a wheel builds without metadata errors.
+Expected: a wheel builds and includes `compaction_sentinel/assets/skills/compaction-sentinel/SKILL.md`.

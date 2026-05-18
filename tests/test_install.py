@@ -32,6 +32,7 @@ class InstallTests(unittest.TestCase):
             commands = json.dumps(hooks)
             self.assertIn("existing.py", commands)
             self.assertIn("compaction-sentinel", commands)
+            self.assertIn("PermissionRequest", commands)
             config = (home / "config.toml").read_text(encoding="utf-8")
             self.assertIn("[mcp_servers.compaction_sentinel]", config)
             self.assertIn("hooks = true", config)
@@ -42,6 +43,7 @@ class InstallTests(unittest.TestCase):
             self.assertTrue(status["ok"])
             self.assertTrue(status["runtime_exists"])
             self.assertTrue(status["hooks_present"])
+            self.assertTrue(status["hooks_by_event"]["PermissionRequest"])
             self.assertEqual(status["auto_continue"], "off")
 
     def test_remove_toml_table(self) -> None:
@@ -75,6 +77,26 @@ class InstallTests(unittest.TestCase):
                 enable_stop_continue=True,
             )
             self.assertEqual(doctor(codex_home=home)["auto_continue"], "gentle")
+
+    def test_backup_list_restore_and_purge_uninstall(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            home.mkdir()
+            (home / "hooks.json").write_text('{"hooks":{}}\n', encoding="utf-8")
+            (home / "config.toml").write_text("[features]\nhooks = false\n", encoding="utf-8")
+            install(source_root=source_root, codex_home=home, skills_target="codex")
+            from compaction_sentinel.install import list_backups, restore_backup, uninstall
+
+            backups = list_backups(home)
+            self.assertTrue(backups)
+            hooks_backup = next(item for item in backups if item["target"] == "hooks.json")
+            (home / "hooks.json").write_text('{"hooks":{}}\n', encoding="utf-8")
+            restored = restore_backup(home, hooks_backup["id"])
+            self.assertTrue(Path(restored["target"]).exists())
+            result = uninstall(codex_home=home, purge=True)
+            self.assertIn("runtime-and-ledger", result["removed"])
+            self.assertFalse((home / "compaction-sentinel").exists())
 
 
 if __name__ == "__main__":

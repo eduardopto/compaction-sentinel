@@ -17,6 +17,14 @@ from .core import VERSION, install_root, load_runtime_config, write_runtime_conf
 HOOK_MARKER = "compaction-sentinel"
 SUPPORTED_MACOS = "Darwin"
 MIN_PYTHON = (3, 11)
+HOOK_EVENTS = {
+    "SessionStart": 10,
+    "UserPromptSubmit": 10,
+    "PreToolUse": 5,
+    "PermissionRequest": 5,
+    "PostToolUse": 5,
+    "Stop": 10,
+}
 
 
 def hook_command(codex_home: Path, event_name: str) -> str:
@@ -43,6 +51,37 @@ def source_repo_root(source_root: Path) -> Path:
     return root
 
 
+def package_dir() -> Path:
+    return Path(__file__).resolve().parent
+
+
+def runtime_source(source_root: Path) -> Path:
+    source_root = source_repo_root(source_root)
+    repo_runtime = source_root / "src" / "compaction_sentinel"
+    if repo_runtime.exists():
+        return repo_runtime
+    return package_dir()
+
+
+def skill_source(source_root: Path) -> Path:
+    source_root = source_repo_root(source_root)
+    repo_skill = source_root / "skills" / "compaction-sentinel"
+    if repo_skill.exists():
+        return repo_skill
+    packaged_skill = package_dir() / "assets" / "skills" / "compaction-sentinel"
+    if packaged_skill.exists():
+        return packaged_skill
+    raise FileNotFoundError("Compaction Sentinel skill assets are missing.")
+
+
+def ensure_source_assets(source_root: Path) -> None:
+    runtime = runtime_source(source_root)
+    skill = skill_source(source_root)
+    missing = [str(path) for path in (runtime, skill / "SKILL.md") if not path.exists()]
+    if missing:
+        raise FileNotFoundError("Install assets are missing: " + ", ".join(missing))
+
+
 def install(
     *,
     source_root: Path,
@@ -54,7 +93,7 @@ def install(
 ) -> dict[str, Any]:
     ensure_supported_environment()
     source_root = source_repo_root(source_root)
-    ensure_source_tree(source_root)
+    ensure_source_assets(source_root)
     actions: list[str] = []
     actual_auto_continue = auto_continue or ("gentle" if enable_stop_continue else None)
     if not dry_run:
@@ -90,25 +129,17 @@ def ensure_supported_environment() -> None:
         raise RuntimeError(f"Python {required}+ is required.")
 
 
-def ensure_source_tree(source_root: Path) -> None:
-    required = [
-        source_root / "src" / "compaction_sentinel",
-        source_root / "skills" / "compaction-sentinel" / "SKILL.md",
-    ]
-    missing = [str(path) for path in required if not path.exists()]
-    if missing:
-        raise FileNotFoundError(
-            "Install must run from a source checkout. Missing: " + ", ".join(missing)
-        )
-
-
 def install_package(source_root: Path, codex_home: Path) -> None:
     root = install_root(codex_home)
     package_dst = root / "runtime" / "compaction_sentinel"
     if package_dst.exists():
         shutil.rmtree(package_dst)
     package_dst.parent.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(source_root / "src" / "compaction_sentinel", package_dst)
+    shutil.copytree(
+        runtime_source(source_root),
+        package_dst,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", "*.sqlite", "*.log"),
+    )
 
     bin_dir = root / "bin"
     bin_dir.mkdir(parents=True, exist_ok=True)
@@ -150,7 +181,7 @@ def install_public_link(link: Path, target: Path) -> None:
 
 
 def install_skill(source_root: Path, codex_home: Path, target: str) -> None:
-    skill_src = source_root / "skills" / "compaction-sentinel"
+    skill_src = skill_source(source_root)
     targets: list[Path] = []
     if target in {"codex", "both"}:
         targets.append(codex_home / "skills" / "compaction-sentinel")
@@ -164,7 +195,7 @@ def install_skill(source_root: Path, codex_home: Path, target: str) -> None:
 
 
 def sentinel_hook_group(codex_home: Path, event_name: str, timeout: int) -> dict[str, Any]:
-    return {
+    group: dict[str, Any] = {
         "hooks": [
             {
                 "type": "command",
@@ -174,6 +205,9 @@ def sentinel_hook_group(codex_home: Path, event_name: str, timeout: int) -> dict
             }
         ]
     }
+    if event_name in {"PreToolUse", "PermissionRequest", "PostToolUse"}:
+        group["matcher"] = "*"
+    return group
 
 
 def merge_hooks(codex_home: Path) -> None:
@@ -189,20 +223,10 @@ def merge_hooks(codex_home: Path) -> None:
             backup = hooks_path.with_suffix(".json.bak")
             shutil.copy2(hooks_path, backup)
     hooks = data.setdefault("hooks", {})
-    events = {
-        "SessionStart": 10,
-        "UserPromptSubmit": 10,
-        "PreToolUse": 5,
-        "PostToolUse": 5,
-        "Stop": 10,
-    }
-    for event_name, timeout in events.items():
+    for event_name, timeout in HOOK_EVENTS.items():
         groups = hooks.setdefault(event_name, [])
         groups[:] = [group for group in groups if not hook_group_has_marker(group)]
-        group = sentinel_hook_group(codex_home, event_name, timeout)
-        if event_name in {"PreToolUse", "PostToolUse"}:
-            group["matcher"] = "*"
-        groups.append(group)
+        groups.append(sentinel_hook_group(codex_home, event_name, timeout))
     codex_home.mkdir(parents=True, exist_ok=True)
     atomic_write_text(hooks_path, json.dumps(data, indent=2) + "\n")
 
@@ -275,6 +299,46 @@ def backup_file(path: Path) -> Path | None:
     return backup
 
 
+def list_backups(codex_home: Path) -> list[dict[str, str]]:
+    backup_dir = codex_home / "backups" / "compaction-sentinel"
+    if not backup_dir.exists():
+        return []
+    out: list[dict[str, str]] = []
+    for path in sorted(backup_dir.glob("*.bak"), key=lambda item: item.stat().st_mtime, reverse=True):
+        out.append(
+            {
+                "id": path.name,
+                "path": str(path),
+                "target": backup_target_name(path.name),
+                "created_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime(path.stat().st_mtime)),
+            }
+        )
+    return out
+
+
+def backup_target_name(name: str) -> str:
+    for target in ("hooks.json", "config.toml"):
+        if name.startswith(target + "."):
+            return target
+    return name.split(".")[0]
+
+
+def restore_backup(codex_home: Path, backup_id: str) -> dict[str, str]:
+    backup_dir = codex_home / "backups" / "compaction-sentinel"
+    backup = backup_dir / backup_id
+    if not backup.exists():
+        matches = list(backup_dir.glob(f"*{backup_id}*")) if backup_dir.exists() else []
+        if len(matches) == 1:
+            backup = matches[0]
+        else:
+            raise FileNotFoundError(f"backup not found or ambiguous: {backup_id}")
+    target_name = backup_target_name(backup.name)
+    target = codex_home / target_name
+    backup_file(target)
+    shutil.copy2(backup, target)
+    return {"restored": str(backup), "target": str(target)}
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(f".{path.name}.tmp")
@@ -303,7 +367,7 @@ def remove_toml_table(text: str, table: str) -> str:
     return "\n".join(out)
 
 
-def uninstall(*, codex_home: Path) -> dict[str, Any]:
+def uninstall(*, codex_home: Path, purge: bool = False) -> dict[str, Any]:
     hooks_path = codex_home / "hooks.json"
     removed: list[str] = []
     if hooks_path.exists():
@@ -335,7 +399,14 @@ def uninstall(*, codex_home: Path) -> dict[str, Any]:
         if public_link_points_to_sentinel(link):
             link.unlink()
             removed.append(f"cli:{link.name}")
-    return {"version": VERSION, "removed": removed, "runtime_left_in_place": str(install_root(codex_home))}
+    if purge and install_root(codex_home).exists():
+        shutil.rmtree(install_root(codex_home))
+        removed.append("runtime-and-ledger")
+    return {
+        "version": VERSION,
+        "removed": removed,
+        "runtime_left_in_place": None if purge else str(install_root(codex_home)),
+    }
 
 
 def doctor(*, codex_home: Path) -> dict[str, Any]:
@@ -344,11 +415,11 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
     config_path = codex_home / "config.toml"
     issues: list[str] = []
     warnings: list[str] = []
-    hooks_by_event: dict[str, bool] = {}
+    hooks_by_event: dict[str, bool] = {event_name: False for event_name in HOOK_EVENTS}
     if hooks_path.exists():
         try:
             data = json.loads(hooks_path.read_text(encoding="utf-8"))
-            for event_name in ("SessionStart", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"):
+            for event_name in HOOK_EVENTS:
                 hooks_by_event[event_name] = any(
                     hook_group_has_marker(group)
                     for group in data.get("hooks", {}).get(event_name, [])
@@ -398,7 +469,51 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
         "mcp_present": mcp_present,
         "hooks_feature_present": hooks_feature_present,
         "auto_continue": config.get("auto_continue"),
+        "retention_days": config.get("retention_days"),
+        "redact": config.get("redact"),
+        "backups": len(list_backups(codex_home)),
     }
+
+
+def doctor_fix(*, codex_home: Path) -> dict[str, Any]:
+    actions: list[str] = []
+    root = install_root(codex_home)
+    if not root.exists():
+        raise RuntimeError("runtime is missing; run `compaction-sentinel install` from a checkout or pipx/uvx install first")
+    merge_hooks(codex_home)
+    actions.append("merged hooks.json")
+    merge_mcp_config(codex_home)
+    actions.append("merged MCP config")
+    ensure_hooks_feature(codex_home)
+    actions.append("enabled hooks feature")
+    launcher = root / "bin" / "compaction-sentinel"
+    public_bin = codex_home / "bin"
+    public_bin.mkdir(parents=True, exist_ok=True)
+    install_public_link(public_bin / "compaction-sentinel", launcher)
+    install_public_link(public_bin / "cs", launcher)
+    actions.append("checked CLI links")
+    result = doctor(codex_home=codex_home)
+    result["fix_actions"] = actions
+    return result
+
+
+def doctor_explanations(result: dict[str, Any]) -> list[str]:
+    explanations: list[str] = []
+    for issue in result.get("issues", []):
+        text = str(issue)
+        if "hooks.json" in text:
+            explanations.append("Hooks load the automatic resume packet; rerun install or `cs doctor --fix`.")
+        elif "MCP" in text or "mcp" in text:
+            explanations.append("MCP tools let Codex explicitly save/search checkpoints; `cs doctor --fix` rewrites the config block.")
+        elif "runtime" in text:
+            explanations.append("The runtime contains the hook scripts and local ledger code; reinstall from the package.")
+        elif "hooks feature" in text:
+            explanations.append("Codex must have `[features] hooks = true` for user-level hooks to run.")
+        else:
+            explanations.append(text)
+    if not explanations:
+        explanations.append("No blocking install issues detected.")
+    return explanations
 
 
 def public_link_points_to_sentinel(link: Path) -> bool:

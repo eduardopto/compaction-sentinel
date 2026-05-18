@@ -5,9 +5,14 @@ Compaction Sentinel stores compact local continuity state under `~/.codex/compac
 ## Data Handling
 
 - It does not intentionally store full transcripts.
-- It redacts common API-key, token, password, and bearer-secret patterns before writing hook text.
-- It stores prompt excerpts, tool summaries, checkpoint text, and notes locally in SQLite.
+- It redacts common secrets before writing hook text, including OpenAI keys, GitHub PATs, AWS keys, Google API keys, Slack tokens, JWTs, private keys, bearer tokens, env-style secrets, and high-entropy values.
+- It stores prompt excerpts, tool summaries, permission-request summaries, checkpoint text, and notes locally in SQLite.
 - It creates timestamped backups of `~/.codex/hooks.json` and `~/.codex/config.toml` before installer changes.
+- It supports `cs export`, `cs scrub`, and retention controls.
+
+## Permission Requests
+
+Sentinel records `PermissionRequest` events but does not approve or deny them. It is continuity telemetry, not an approval robot.
 
 ## Reporting Issues
 

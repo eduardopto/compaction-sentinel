@@ -1,0 +1,3 @@
+{"event":"UserPromptSubmit","payload":{"cwd":"$PROJECT","session_id":"s1","turn_id":"t1","prompt":"set goal: fix the installer only"}}
+{"event":"UserPromptSubmit","payload":{"cwd":"$PROJECT","session_id":"s1","turn_id":"t2","prompt":"set goal: make packet v2 and replay evals the new priority"}}
+{"assert":{"cwd":"$PROJECT","active_objective_contains":"make packet v2 and replay evals the new priority","packet_contains":["make packet v2 and replay evals the new priority","Continue from the active task state"],"max_chars":9000}}

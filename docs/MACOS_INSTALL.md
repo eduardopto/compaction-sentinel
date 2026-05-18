@@ -5,38 +5,45 @@ Compaction Sentinel is designed for Codex Desktop on macOS.
 ## Requirements
 
 - macOS with Codex Desktop installed.
-- Python 3.11 or newer available from Terminal.
+- Python 3.11 or newer.
 - Codex hooks enabled. The installer ensures `hooks = true` in `~/.codex/config.toml`.
 
-## Install
-
-From the repository:
+## Install From A Checkout
 
 ```bash
 git clone https://github.com/eduardopto/compaction-sentinel.git
 cd compaction-sentinel
-python3 scripts/install.py
+python3 scripts/install.py --doctor
 ```
 
-The installer writes:
+## Install With pipx Or uvx
+
+```bash
+pipx install git+https://github.com/eduardopto/compaction-sentinel.git
+cs install --doctor
+```
+
+or:
+
+```bash
+uvx --from git+https://github.com/eduardopto/compaction-sentinel.git compaction-sentinel install --doctor
+```
+
+Package installs include the skill assets, so they do not require a source checkout after installation.
+
+## What The Installer Writes
 
 - `~/.codex/compaction-sentinel/` runtime files and SQLite database.
-- `~/.codex/hooks.json` hook entries.
+- `~/.codex/hooks.json` entries for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
 - `~/.codex/config.toml` MCP entry.
 - `~/.codex/skills/compaction-sentinel` skill copy.
 - `~/.agents/skills/compaction-sentinel` skill copy.
-- `~/.codex/bin/cs` and `~/.codex/bin/compaction-sentinel` command shims.
+- `~/.codex/bin/cs` and `~/.codex/bin/compaction-sentinel` shims when those names are available.
 
-Before changing `~/.codex/hooks.json` or `~/.codex/config.toml`, the installer writes timestamped backups under:
+Before changing `~/.codex/hooks.json` or `~/.codex/config.toml`, the installer writes backups under:
 
 ```bash
 ~/.codex/backups/compaction-sentinel/
-```
-
-If `~/.codex/bin` is not on your shell path, use the full command path:
-
-```bash
-~/.codex/bin/cs status
 ```
 
 ## After Install
@@ -46,22 +53,28 @@ Restart Codex Desktop. If Codex asks you to review new hooks, trust the Compacti
 Verify:
 
 ```bash
-~/.codex/bin/cs doctor
+~/.codex/bin/cs doctor --explain
 codex mcp list
 ```
 
-You should see `compaction_sentinel` in the MCP list.
+You should see `compaction_sentinel` in the MCP list and `doctor` should return `"ok": true`.
 
-`doctor` should return `"ok": true`. If it does not, see [TROUBLESHOOTING.md](TROUBLESHOOTING.md).
-
-## Update
-
-Pull the latest repository changes, then rerun the installer:
+## Repair
 
 ```bash
-git pull
-python3 scripts/install.py
+~/.codex/bin/cs doctor --fix --explain
 ```
+
+This repairs missing hook entries, the MCP block, the hooks feature flag, and Sentinel-owned CLI links. It does not erase your ledger.
+
+## Backups
+
+```bash
+~/.codex/bin/cs backup list
+~/.codex/bin/cs backup restore hooks.json.20260518-120000.bak
+```
+
+Backups are normal files. Restoring creates another backup of the current target first.
 
 ## Auto-Continue Policy
 
@@ -77,12 +90,16 @@ For long unattended runs:
 python3 scripts/install.py --auto-continue gentle
 ```
 
-`gentle` asks Codex to continue only when an active checkpoint exists and the last message does not look complete. `strict` is more aggressive and should be used carefully.
+`gentle` is capped per turn and will not continue if the last assistant message looks complete, the same checkpoint/next action was already used, or loop warnings are already firing. `strict` is available but intentionally scary.
 
 ## Uninstall
 
 ```bash
-python3 scripts/uninstall.py
+~/.codex/bin/cs uninstall
 ```
 
-The uninstall command removes the hook and MCP registrations. It leaves the local database in place so you can recover or remove it manually.
+To remove the local runtime and ledger too:
+
+```bash
+~/.codex/bin/cs uninstall --purge
+```
