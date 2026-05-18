@@ -1,0 +1,14 @@
+.DS_Store
+.coverage
+.pytest_cache/
+__pycache__/
+*.py[cod]
+*.sqlite
+*.sqlite-shm
+*.sqlite-wal
+build/
+dist/
+*.egg-info/
+.venv/
+.mypy_cache/
+.ruff_cache/

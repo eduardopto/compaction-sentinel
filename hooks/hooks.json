@@ -1,0 +1,66 @@
+{
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONPATH=${PLUGIN_ROOT}/src python3 -m compaction_sentinel.cli hook SessionStart",
+            "timeout": 10,
+            "statusMessage": "compaction-sentinel: SessionStart"
+          }
+        ]
+      }
+    ],
+    "UserPromptSubmit": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONPATH=${PLUGIN_ROOT}/src python3 -m compaction_sentinel.cli hook UserPromptSubmit",
+            "timeout": 10,
+            "statusMessage": "compaction-sentinel: UserPromptSubmit"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONPATH=${PLUGIN_ROOT}/src python3 -m compaction_sentinel.cli hook PreToolUse",
+            "timeout": 5,
+            "statusMessage": "compaction-sentinel: PreToolUse"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "*",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONPATH=${PLUGIN_ROOT}/src python3 -m compaction_sentinel.cli hook PostToolUse",
+            "timeout": 5,
+            "statusMessage": "compaction-sentinel: PostToolUse"
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONPATH=${PLUGIN_ROOT}/src python3 -m compaction_sentinel.cli hook Stop",
+            "timeout": 10,
+            "statusMessage": "compaction-sentinel: Stop"
+          }
+        ]
+      }
+    ]
+  }
+}

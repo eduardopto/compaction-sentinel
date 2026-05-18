@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "compaction-sentinel"
+version = "0.1.0"
+description = "Codex Desktop continuity hooks, skill, and MCP tools that preserve active work across compaction."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+authors = [{ name = "Eduardo Castillo" }]
+keywords = ["codex", "codex-desktop", "hooks", "skills", "mcp", "compaction", "continuity"]
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Environment :: Console",
+  "Intended Audience :: Developers",
+  "Programming Language :: Python :: 3",
+  "Programming Language :: Python :: 3.11",
+  "Topic :: Software Development",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/eduardopto/compaction-sentinel"
+Repository = "https://github.com/eduardopto/compaction-sentinel"
+Issues = "https://github.com/eduardopto/compaction-sentinel/issues"
+
+[project.scripts]
+compaction-sentinel = "compaction_sentinel.cli:main"
+cs = "compaction_sentinel.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+include-package-data = true
+
+[tool.setuptools.packages.find]
+where = ["src"]
