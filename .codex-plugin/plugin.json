@@ -1,6 +1,6 @@
 {
   "name": "compaction-sentinel",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Codex Desktop continuity hooks, skill, and MCP tools that preserve active work across compaction.",
   "author": {
     "name": "Eduardo Castillo"
@@ -20,6 +20,8 @@
     "category": "Productivity",
     "capabilities": ["Read", "Write"],
     "websiteURL": "https://github.com/eduardopto/compaction-sentinel",
+    "privacyPolicyURL": "https://github.com/eduardopto/compaction-sentinel/blob/main/docs/PRIVACY.md",
+    "termsOfServiceURL": "https://github.com/eduardopto/compaction-sentinel/blob/main/LICENSE",
     "brandColor": "#2563EB",
     "defaultPrompt": [
       "Use Compaction Sentinel for this long-running task and checkpoint the current objective before compaction.",

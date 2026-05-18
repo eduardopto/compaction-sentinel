@@ -48,7 +48,7 @@ Redaction is best effort. Do not paste secrets into Codex prompts if you can avo
 ## Export
 
 ```bash
-cs export --project --output sentinel-export.json
+cs export --project --cwd "$PWD" --output sentinel-export.json
 ```
 
 This exports the current project's Sentinel ledger data as JSON for inspection or bug reports.
@@ -56,11 +56,13 @@ This exports the current project's Sentinel ledger data as JSON for inspection o
 ## Scrub
 
 ```bash
-cs scrub --project
+cs scrub --project --cwd "$PWD"
 cs scrub --all
 ```
 
-`--project` deletes data for the current project root. `--all` deletes events, notes, checkpoints, and Sentinel state for every project.
+`--project` deletes events, notes, checkpoints, and hashed project-scoped state keys for the current project root. `--all` deletes events, notes, checkpoints, and Sentinel state for every project.
+
+New Stop-continuation state keys use a hash of the project root instead of storing raw project paths.
 
 ## Retention
 

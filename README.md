@@ -31,7 +31,7 @@ With Sentinel:
 Example packet excerpt:
 
 ```xml
-<compaction-sentinel version="0.3.0" schema="packet-v2" reason="session-start">
+<compaction-sentinel version="0.4.0" schema="packet-v2" reason="session-start">
   <active_objective>
   status: active
   objective: Finish auth repair and device verification
@@ -51,6 +51,7 @@ Example packet excerpt:
 - Packet v2: a ranked operating brief with authority, objective, acceptance criteria, current state, next action, do-not-repeat items, blockers, evidence, and recent trail.
 - A local SQLite ledger under `~/.codex/compaction-sentinel/`.
 - MCP tools: `compaction_checkpoint`, `compaction_evidence_add`, `compaction_avoid_add`, `compaction_note`, `compaction_packet`, `compaction_search`, and `compaction_status`.
+- A strict MCP `cwd` contract so every tool call targets an explicit project.
 - CLI commands for checkpoints, evidence, avoid-list items, scrub/export, retention, config, backups, doctor repair, and uninstall.
 - Replay evals for stale restarts, repeated failures, objective changes, tool-output blindness, redaction, project switching, and Stop continuation loops.
 - Secret redaction for OpenAI keys, GitHub PATs, AWS keys, Google API keys, Slack tokens, JWTs, private keys, bearer tokens, env-style secrets, and high-entropy values.
@@ -70,7 +71,7 @@ Pipx/uvx-friendly install from GitHub:
 
 ```bash
 pipx install git+https://github.com/eduardopto/compaction-sentinel.git
-cs install --doctor
+compaction-sentinel install --doctor
 ```
 
 or:
@@ -94,6 +95,7 @@ Create a detailed checkpoint:
 
 ```bash
 ~/.codex/bin/cs checkpoint \
+  --cwd "$PWD" \
   --objective "Fix checkout reliability and verify on device" \
   --acceptance-criteria "Saved answers never disappear; report locked-phone launch separately" \
   --current-step "Generation retry path is fixed" \
@@ -107,26 +109,28 @@ Create a detailed checkpoint:
 Append evidence:
 
 ```bash
-~/.codex/bin/cs evidence add "make test passed at 2026-05-18T18:20Z"
+~/.codex/bin/cs evidence add --cwd "$PWD" "make test passed at 2026-05-18T18:20Z"
 ```
 
 Record something not to repeat:
 
 ```bash
-~/.codex/bin/cs avoid add "Do not rerun npm install; dependency issue was already ruled out"
+~/.codex/bin/cs avoid add --cwd "$PWD" "Do not rerun npm install; dependency issue was already ruled out"
 ```
 
 Show the packet Codex will receive:
 
 ```bash
-~/.codex/bin/cs packet
+~/.codex/bin/cs packet --cwd "$PWD"
 ```
+
+When Codex uses the MCP tools, it must pass the active project `cwd` every time. Missing `cwd` fails clearly instead of silently writing state to the wrong project.
 
 Privacy operations:
 
 ```bash
-~/.codex/bin/cs export --project --output sentinel-export.json
-~/.codex/bin/cs scrub --project
+~/.codex/bin/cs export --project --cwd "$PWD" --output sentinel-export.json
+~/.codex/bin/cs scrub --project --cwd "$PWD"
 ~/.codex/bin/cs retention set --days 14
 ~/.codex/bin/cs config set redact true
 ```
@@ -158,7 +162,7 @@ python3 scripts/install.py --auto-continue gentle
 python3 scripts/install.py --auto-continue strict
 ```
 
-`gentle` continues only when there is an active checkpoint and no completion-looking final message. Stop continuation is capped per turn, remembers the last checkpoint/next action it used, and stops if loop warnings are already firing. `strict` is intentionally documented as risky.
+`gentle` continues only when there is an active checkpoint and no verified-completion final message. Stop continuation is capped by `stop_continue_max_per_turn`, also capped by `stop_continue_max_per_checkpoint_per_turn`, honors `stop_continue_cooldown_seconds`, remembers the last checkpoint/next action it used, and stops if loop warnings are already firing. A zero turn cap disables Stop continuation even when `auto_continue` is enabled. `strict` is intentionally documented as risky.
 
 ## Plugin Positioning
 

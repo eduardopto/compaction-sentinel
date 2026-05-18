@@ -12,6 +12,8 @@ Compaction Sentinel is not a second agent and not a replacement for OpenAI serve
 
 You do not need to say "use Compaction Sentinel" in every chat after installation and restart.
 
+All MCP tools require an explicit `cwd`. This avoids a subtle but serious reliability bug: a model or MCP server process should never guess which project should receive continuity state.
+
 ## Runtime Files
 
 - Runtime: `~/.codex/compaction-sentinel/`
@@ -69,6 +71,8 @@ status
 ```
 
 New active checkpoints supersede older active checkpoints for the same project. A complete checkpoint closes active work for that project.
+
+Stop continuation state uses a hash of the project root instead of storing raw project paths in state keys. It is capped by `stop_continue_max_per_turn`, also capped by `stop_continue_max_per_checkpoint_per_turn`, and it honors `stop_continue_cooldown_seconds`. A zero turn cap disables Stop continuation even when `auto_continue` is enabled.
 
 ## Regression Warnings
 

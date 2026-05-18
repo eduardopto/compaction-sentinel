@@ -35,7 +35,7 @@ Active and blocked checkpoints are kept because they may be needed to resume liv
 ## Manual Deletion
 
 ```bash
-cs scrub --project
+cs scrub --project --cwd "$PWD"
 cs scrub --all
 ```
 

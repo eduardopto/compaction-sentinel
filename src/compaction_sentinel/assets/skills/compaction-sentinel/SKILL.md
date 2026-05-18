@@ -18,29 +18,46 @@ When Compaction Sentinel is installed, hooks should already inject a resume pack
 5. Keep checkpoints factual and compact: objective, acceptance criteria, current step, next action, blockers, evidence, files touched, commands run, tests passed/failed, decisions, assumptions, and do-not-repeat items when relevant.
 6. If the packet and repository disagree, verify the repository and update the checkpoint.
 7. Do not treat a loop warning as proof of failure; inspect the latest concrete output and then choose a different hypothesis.
+8. Always pass the active project `cwd` when calling any Compaction Sentinel MCP tool.
+9. After tests, builds, installs, or other meaningful tool results, call `compaction_evidence_add` with the exact `cwd` and a compact evidence note.
+10. After a repeated failed route or ruled-out hypothesis, call `compaction_avoid_add` with the exact `cwd`.
+11. Before claiming completion, verify the user's acceptance criteria and the latest tool output. Do not claim completion from a checkpoint alone.
 
 ## MCP Tools
 
 When available, prefer the `compaction_sentinel` MCP tools:
 
 - `compaction_checkpoint`: save a durable checkpoint.
+- `compaction_evidence_add`: append command/test/build/install evidence to the active checkpoint.
+- `compaction_avoid_add`: append a route, command, or hypothesis that should not be repeated.
 - `compaction_note`: save a durable note that should survive compaction.
 - `compaction_packet`: fetch the current resume packet.
 - `compaction_search`: search recent recorded events.
 - `compaction_status`: inspect the current state.
+
+Always include `cwd` in MCP calls. Example:
+
+```json
+{
+  "cwd": "/absolute/path/to/project",
+  "objective": "Fix account deletion and install on device.",
+  "current_step": "Native sync passed.",
+  "next_action": "Install on the connected iPhone."
+}
+```
 
 ## CLI Fallback
 
 If MCP tools are unavailable but the runtime is installed, use:
 
 ```bash
-cs checkpoint --objective "..." --current-step "..." --next-action "..." --evidence "..."
-cs checkpoint --same-objective --current-step "..." --next-action "..." --tests-passed "..."
-cs evidence add "make test passed"
-cs avoid add "Do not rerun npm install; dependency issue was already ruled out"
-cs note "..." --when "..."
-cs packet
-cs status
+cs checkpoint --cwd "$PWD" --objective "..." --current-step "..." --next-action "..." --evidence "..."
+cs checkpoint --cwd "$PWD" --same-objective --current-step "..." --next-action "..." --tests-passed "..."
+cs evidence add --cwd "$PWD" "make test passed"
+cs avoid add --cwd "$PWD" "Do not rerun npm install; dependency issue was already ruled out"
+cs note --cwd "$PWD" "..." --when "..."
+cs packet --cwd "$PWD"
+cs status --cwd "$PWD"
 cs doctor
 ```
 

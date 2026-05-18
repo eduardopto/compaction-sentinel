@@ -10,10 +10,14 @@ from compaction_sentinel.core import (
     active_checkpoint,
     build_resume_packet,
     connect,
+    get_state,
     handle_hook,
+    looks_complete,
     project_from_payload,
+    project_state_prefix,
     redact_text,
     save_checkpoint,
+    scrub_project,
 )
 
 
@@ -239,6 +243,148 @@ class CoreTests(unittest.TestCase):
             second = handle_hook("Stop", payload, codex_home=home)
             self.assertEqual(first.get("decision"), "block")
             self.assertEqual(second, {})
+
+    def test_stop_continue_session_turn_cap_survives_checkpoint_refresh(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            config_path = home / "compaction-sentinel" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "auto_continue": "gentle",
+                        "stop_continue_max_per_turn": 1,
+                        "stop_continue_max_per_checkpoint_per_turn": 5,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload_project = project_from_payload({"cwd": str(project)})
+            db = connect(home)
+            save_checkpoint(
+                db,
+                payload_project,
+                objective="Finish verification",
+                current_step="Step one",
+                next_action="Run first check",
+            )
+            db.close()
+            payload = {"cwd": str(project), "session_id": "s1", "turn_id": "t1", "last_assistant_message": "Still working."}
+            first = handle_hook("Stop", payload, codex_home=home)
+            db = connect(home)
+            save_checkpoint(
+                db,
+                payload_project,
+                objective="Finish verification",
+                current_step="Step two",
+                next_action="Run second check",
+            )
+            db.close()
+            second = handle_hook("Stop", payload, codex_home=home)
+            self.assertEqual(first.get("decision"), "block")
+            self.assertEqual(second, {})
+
+    def test_stop_continue_cooldown_blocks_later_turn(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            config_path = home / "compaction-sentinel" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "auto_continue": "gentle",
+                        "stop_continue_max_per_turn": 5,
+                        "stop_continue_cooldown_seconds": 300,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload_project = project_from_payload({"cwd": str(project)})
+            db = connect(home)
+            save_checkpoint(db, payload_project, objective="Finish verification", next_action="Run first check")
+            db.close()
+            first = handle_hook(
+                "Stop",
+                {"cwd": str(project), "session_id": "s1", "turn_id": "t1", "last_assistant_message": "Still working."},
+                codex_home=home,
+            )
+            db = connect(home)
+            save_checkpoint(db, payload_project, objective="Finish verification", next_action="Run second check")
+            db.close()
+            second = handle_hook(
+                "Stop",
+                {"cwd": str(project), "session_id": "s1", "turn_id": "t2", "last_assistant_message": "Still working."},
+                codex_home=home,
+            )
+            self.assertEqual(first.get("decision"), "block")
+            self.assertEqual(second, {})
+
+    def test_stop_continue_zero_turn_cap_blocks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            config_path = home / "compaction-sentinel" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps({"auto_continue": "gentle", "stop_continue_max_per_turn": 0}),
+                encoding="utf-8",
+            )
+            payload_project = project_from_payload({"cwd": str(project)})
+            db = connect(home)
+            save_checkpoint(db, payload_project, objective="Finish verification", next_action="Run check")
+            db.close()
+            out = handle_hook(
+                "Stop",
+                {"cwd": str(project), "session_id": "s1", "turn_id": "t1", "last_assistant_message": "Still working."},
+                codex_home=home,
+            )
+            self.assertEqual(out, {})
+
+    def test_completion_detection_rejects_partial_completion(self) -> None:
+        self.assertTrue(looks_complete("All tests passed and CI is green."))
+        self.assertFalse(looks_complete("Done with the first pass, but tests are still failing."))
+        self.assertFalse(looks_complete("Completed the edit, not verified yet."))
+        self.assertFalse(looks_complete("Could not finish because one blocker is remaining."))
+
+    def test_scrub_project_removes_project_state_without_raw_path_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            project_path.mkdir()
+            (project_path / ".git").mkdir()
+            config_path = home / "compaction-sentinel" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps({"auto_continue": "gentle", "stop_continue_max_per_turn": 2}),
+                encoding="utf-8",
+            )
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            save_checkpoint(db, project, objective="Finish verification", next_action="Run check")
+            db.close()
+            out = handle_hook(
+                "Stop",
+                {"cwd": str(project_path), "session_id": "s1", "turn_id": "t1", "last_assistant_message": "Still working."},
+                codex_home=home,
+            )
+            self.assertEqual(out.get("decision"), "block")
+            db = connect(home)
+            state_keys = [row["key"] for row in db.execute("SELECT key FROM state").fetchall()]
+            self.assertTrue(any(key.startswith(project_state_prefix(project)) for key in state_keys))
+            self.assertFalse(any(str(project.root) in key for key in state_keys))
+            counts = scrub_project(db, project)
+            remaining = db.execute("SELECT COUNT(*) AS count FROM state").fetchone()
+            db.close()
+            self.assertGreater(counts["state"], 0)
+            self.assertEqual(int(remaining["count"]), 0)
 
 
 if __name__ == "__main__":

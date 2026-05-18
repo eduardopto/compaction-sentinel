@@ -1,3 +1,3 @@
 {"event":"UserPromptSubmit","payload":{"cwd":"$PROJECT","session_id":"s1","turn_id":"t1","prompt":"set goal: protect this token ghp_abcdefghijklmnopqrstuvwxyz123456 and this AWS key AKIA1234567890ABCDEF"}}
 {"event":"PreToolUse","payload":{"cwd":"$PROJECT","session_id":"s1","turn_id":"t1","tool_use_id":"pre-secret","tool_name":"Bash","tool_input":{"command":"export SLACK_TOKEN=xoxb-123456789012-ABCDEFGHIJKL && echo ok"}}}
-{"assert":{"cwd":"$PROJECT","packet_contains":["[redacted]"],"packet_not_contains":["abcdefghijklmnopqrstuvwxyz123456","AKIA1234567890ABCDEF","xoxb-123456789012-ABCDEFGHIJKL"],"max_chars":9000}}
+{"assert":{"cwd":"$PROJECT","packet_contains":["[redacted]"],"packet_not_contains":["abcdefghijklmnopqrstuvwxyz123456","AKIA1234567890ABCDEF","xoxb-123456789012-ABCDEFGHIJKL"],"db_contains":["[redacted]"],"db_not_contains":["abcdefghijklmnopqrstuvwxyz123456","AKIA1234567890ABCDEF","xoxb-123456789012-ABCDEFGHIJKL"],"max_chars":9000}}

@@ -20,7 +20,7 @@ python3 scripts/install.py --doctor
 
 ```bash
 pipx install git+https://github.com/eduardopto/compaction-sentinel.git
-cs install --doctor
+compaction-sentinel install --doctor
 ```
 
 or:
@@ -90,7 +90,7 @@ For long unattended runs:
 python3 scripts/install.py --auto-continue gentle
 ```
 
-`gentle` is capped per turn and will not continue if the last assistant message looks complete, the same checkpoint/next action was already used, or loop warnings are already firing. `strict` is available but intentionally scary.
+`gentle` is capped per session/turn and per checkpoint. It will not continue if the last assistant message looks like verified completion, a cooldown is active, the same checkpoint/next action was already used, or loop warnings are already firing. `strict` is available but intentionally scary.
 
 ## Uninstall
 

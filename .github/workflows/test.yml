@@ -7,10 +7,39 @@ on:
 jobs:
   macos:
     runs-on: macos-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11", "3.12", "3.13"]
     steps:
       - uses: actions/checkout@v5
       - uses: actions/setup-python@v6
         with:
-          python-version: "3.11"
+          python-version: ${{ matrix.python-version }}
       - run: python -m compileall -q src scripts tests plugin_entry.py
       - run: PYTHONPATH=src python -m unittest discover -s tests
+      - run: python scripts/replay_hooks.py tests/fixtures/scenarios/*.jsonl
+      - run: python -m pip wheel . -w "$RUNNER_TEMP/cs-wheel"
+      - name: Check wheel package data
+        run: |
+          python - <<'PY'
+          import pathlib
+          import zipfile
+
+          wheel = next(pathlib.Path("${{ runner.temp }}/cs-wheel").glob("*.whl"))
+          with zipfile.ZipFile(wheel) as archive:
+              names = set(archive.namelist())
+          required = {
+              "compaction_sentinel/assets/skills/compaction-sentinel/SKILL.md",
+              "compaction_sentinel/assets/hooks/hooks.json",
+          }
+          missing = sorted(required - names)
+          if missing:
+              raise SystemExit(f"missing package data: {missing}")
+          PY
+      - name: Install wheel and smoke installer
+        run: |
+          python -m pip install --force-reinstall "$RUNNER_TEMP"/cs-wheel/*.whl
+          compaction-sentinel --codex-home "$RUNNER_TEMP/cs-home" install --skills-target codex --doctor
+          compaction-sentinel --codex-home "$RUNNER_TEMP/cs-home" doctor --fix --explain
+          compaction-sentinel --codex-home "$RUNNER_TEMP/cs-home" uninstall --purge

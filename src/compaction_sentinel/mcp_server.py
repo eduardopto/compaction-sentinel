@@ -49,7 +49,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": CHECKPOINT_PROPERTIES,
-            "required": ["objective"],
+            "required": ["objective", "cwd"],
         },
     },
     {
@@ -67,7 +67,7 @@ TOOLS = [
                 "objective": {"type": "string"},
                 "cwd": {"type": "string"},
             },
-            "required": ["content"],
+            "required": ["content", "cwd"],
         },
     },
     {
@@ -80,7 +80,7 @@ TOOLS = [
                 "objective": {"type": "string"},
                 "cwd": {"type": "string"},
             },
-            "required": ["content"],
+            "required": ["content", "cwd"],
         },
     },
     {
@@ -93,7 +93,7 @@ TOOLS = [
                 "surface_condition": {"type": "string"},
                 "cwd": {"type": "string"},
             },
-            "required": ["content"],
+            "required": ["content", "cwd"],
         },
     },
     {
@@ -105,6 +105,7 @@ TOOLS = [
                 "cwd": {"type": "string"},
                 "max_chars": {"type": "integer", "default": 9000},
             },
+            "required": ["cwd"],
         },
     },
     {
@@ -117,7 +118,7 @@ TOOLS = [
                 "cwd": {"type": "string"},
                 "limit": {"type": "integer", "default": 8},
             },
-            "required": ["query"],
+            "required": ["query", "cwd"],
         },
     },
     {
@@ -126,6 +127,7 @@ TOOLS = [
         "inputSchema": {
             "type": "object",
             "properties": {"cwd": {"type": "string"}},
+            "required": ["cwd"],
         },
     },
 ]
@@ -162,8 +164,12 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
     params = req.get("params") if isinstance(req.get("params"), dict) else {}
     name = params.get("name")
     args = params.get("arguments") if isinstance(params.get("arguments"), dict) else {}
+    cwd = args.get("cwd") if isinstance(args.get("cwd"), str) else ""
+    if not cwd.strip():
+        send(error(req.get("id"), -32602, "cwd is required for all Compaction Sentinel MCP tools. Pass the active project working directory."))
+        return
     db = connect(codex_home)
-    project = project_from_cli(args.get("cwd") if isinstance(args.get("cwd"), str) else None)
+    project = project_from_cli(cwd)
     try:
         if name == "compaction_checkpoint":
             checkpoint_id = save_checkpoint(

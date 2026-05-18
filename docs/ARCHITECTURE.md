@@ -46,7 +46,7 @@ Packet v2 turns ledger state into a ranked brief:
 
 5. MCP Server
 
-MCP tools let Codex explicitly write and query continuity state when available. Hooks still work if MCP is unavailable.
+MCP tools let Codex explicitly write and query continuity state when available. Hooks still work if MCP is unavailable. Every MCP tool requires an explicit `cwd` so project resolution is deterministic.
 
 6. CLI
 
@@ -59,6 +59,7 @@ The CLI is both user-facing and hook-facing. User commands manage checkpoints, e
 - Sentinel does not store full transcripts by default.
 - Sentinel redacts secrets before storing hook text by default.
 - Stop continuation is opt-in and capped.
+- Stop continuation state is keyed by hashed project root, session/turn, and optional checkpoint id; it never needs raw project paths in state keys.
 - Installer writes are backed up and atomic where practical.
 - Plugin packaging exists, but user-level hooks are the reliable install path today.
 
@@ -77,6 +78,6 @@ The CLI is both user-facing and hook-facing. User commands manage checkpoints, e
 
 - If hooks are disabled or not trusted, only the skill/plugin layer remains.
 - If Codex changes hook schemas, Sentinel falls back to best-effort extraction.
-- If the agent ignores injected context, the user may still need to ask it to use the skill or inspect `cs packet`.
+- If the agent ignores injected context, the user may still need to ask it to use the skill or inspect `cs packet --cwd "$PWD"`.
 - If a task has no checkpoint and no useful hook history, the packet can only preserve recent events.
 - Hook coverage is not complete for every possible tool path, so warnings are a continuity guardrail rather than complete enforcement.

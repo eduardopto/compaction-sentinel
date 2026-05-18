@@ -8,6 +8,7 @@ import shutil
 import shlex
 import sys
 import time
+import tomllib
 from pathlib import Path
 from typing import Any
 
@@ -429,8 +430,18 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
     else:
         issues.append("hooks.json is missing")
     config_text = config_path.read_text(encoding="utf-8") if config_path.exists() else ""
-    mcp_present = "[mcp_servers.compaction_sentinel]" in config_text
-    hooks_feature_present = "hooks = true" in config_text
+    config_data: dict[str, Any] = {}
+    if config_text:
+        try:
+            loaded_config = tomllib.loads(config_text)
+            if isinstance(loaded_config, dict):
+                config_data = loaded_config
+        except tomllib.TOMLDecodeError as exc:
+            issues.append(f"config.toml is not valid TOML: {exc}")
+    features = config_data.get("features") if isinstance(config_data.get("features"), dict) else {}
+    mcp_servers = config_data.get("mcp_servers") if isinstance(config_data.get("mcp_servers"), dict) else {}
+    mcp_present = isinstance(mcp_servers, dict) and "compaction_sentinel" in mcp_servers
+    hooks_feature_present = features.get("hooks") is True
     public_cli = codex_home / "bin" / "cs"
     public_cli_owned = public_link_points_to_sentinel(public_cli)
     if platform.system() != SUPPORTED_MACOS:

@@ -4,6 +4,8 @@
 from __future__ import annotations
 
 import argparse
+import contextlib
+import io
 import json
 import sys
 import tempfile
@@ -21,8 +23,10 @@ from compaction_sentinel.core import (  # noqa: E402
     load_runtime_config,
     project_from_cli,
     save_checkpoint,
+    scrub_project,
     write_runtime_config,
 )
+from compaction_sentinel.mcp_server import handle_tool_call  # noqa: E402
 
 
 class ReplayFailure(AssertionError):
@@ -124,6 +128,51 @@ def run_scenario(path: Path, *, verbose: bool = False) -> None:
                         last_output=last_output,
                     )
                 continue
+            if "repeat_event" in step:
+                repeat = step["repeat_event"]
+                count = int(repeat.get("count") or 0)
+                event_name = str(repeat.get("event") or "")
+                payload_template = repeat.get("payload") if isinstance(repeat.get("payload"), dict) else {}
+                for repeat_index in range(count):
+                    payload = replace_placeholders(
+                        payload_template,
+                        {"$INDEX": str(repeat_index), **mapping},
+                    )
+                    last_output = handle_hook(event_name, payload, codex_home=codex_home)
+                continue
+            if "mcp_call" in step:
+                call = step["mcp_call"]
+                req = {
+                    "jsonrpc": "2.0",
+                    "id": step.get("id", index),
+                    "method": "tools/call",
+                    "params": {
+                        "name": call.get("name"),
+                        "arguments": call.get("arguments") if isinstance(call.get("arguments"), dict) else {},
+                    },
+                }
+                last_output = call_mcp(req, codex_home)
+                if verbose:
+                    print(f"{path.name}:{index} mcp:{call.get('name')}: {json.dumps(last_output, sort_keys=True)}")
+                if "expect" in step:
+                    args = req["params"]["arguments"]
+                    run_assertions(
+                        path,
+                        index,
+                        step["expect"],
+                        codex_home=codex_home,
+                        cwd=str(args.get("cwd") or project),
+                        last_output=last_output,
+                    )
+                continue
+            if "scrub_project" in step:
+                cwd = str(step["scrub_project"].get("cwd") or project)
+                db = connect(codex_home)
+                try:
+                    scrub_project(db, project_from_cli(cwd))
+                finally:
+                    db.close()
+                continue
             if "assert" in step:
                 assertions = step["assert"]
                 cwd = str(assertions.get("cwd") or project)
@@ -137,6 +186,20 @@ def run_scenario(path: Path, *, verbose: bool = False) -> None:
                 )
                 continue
             raise ReplayFailure(f"{path}:{index}: unknown replay step")
+
+
+def call_mcp(req: dict[str, Any], codex_home: Path) -> dict[str, Any]:
+    stream = io.StringIO()
+    with contextlib.redirect_stdout(stream):
+        handle_tool_call(req, codex_home)
+    lines = [line for line in stream.getvalue().splitlines() if line.strip()]
+    if not lines:
+        return {}
+    try:
+        value = json.loads(lines[-1])
+    except json.JSONDecodeError as exc:
+        raise ReplayFailure(f"invalid MCP output: {lines[-1]}") from exc
+    return value if isinstance(value, dict) else {}
 
 
 def run_assertions(
@@ -153,6 +216,14 @@ def run_assertions(
     try:
         packet = build_resume_packet(db, project, reason="replay")
         checkpoint = active_checkpoint(db, project)
+        db_text = dump_db_text(db)
+        event_count = int(
+            db.execute(
+                "SELECT COUNT(*) AS count FROM events WHERE project_root = ?",
+                (str(project.root),),
+            ).fetchone()["count"]
+        )
+        state_keys = [str(row["key"]) for row in db.execute("SELECT key FROM state ORDER BY key").fetchall()]
     finally:
         db.close()
     label = f"{path}:{index}"
@@ -187,6 +258,42 @@ def run_assertions(
         raise ReplayFailure(f"{label}: last output did not include a decision")
     if assertions.get("last_output_empty") and last_output:
         raise ReplayFailure(f"{label}: expected empty output, got {last_output!r}")
+    if "db_event_count" in assertions and event_count != int(assertions["db_event_count"]):
+        raise ReplayFailure(f"{label}: event count {event_count} != {assertions['db_event_count']}")
+    if "db_event_count_at_least" in assertions and event_count < int(assertions["db_event_count_at_least"]):
+        raise ReplayFailure(f"{label}: event count {event_count} < {assertions['db_event_count_at_least']}")
+    for expected in assertions.get("db_contains", []):
+        if expected not in db_text:
+            raise ReplayFailure(f"{label}: DB text did not contain {expected!r}")
+    for unexpected in assertions.get("db_not_contains", []):
+        if unexpected in db_text:
+            raise ReplayFailure(f"{label}: DB text unexpectedly contained {unexpected!r}")
+    for expected in assertions.get("state_key_contains", []):
+        if not any(expected in key for key in state_keys):
+            raise ReplayFailure(f"{label}: no state key contained {expected!r}: {state_keys}")
+    for unexpected in assertions.get("state_key_not_contains", []):
+        if any(unexpected in key for key in state_keys):
+            raise ReplayFailure(f"{label}: state key unexpectedly contained {unexpected!r}: {state_keys}")
+    for absent in assertions.get("state_key_absent_contains", []):
+        if any(absent in key for key in state_keys):
+            raise ReplayFailure(f"{label}: state key still contained {absent!r}: {state_keys}")
+    if "state_key_count" in assertions and len(state_keys) != int(assertions["state_key_count"]):
+        raise ReplayFailure(f"{label}: state key count {len(state_keys)} != {assertions['state_key_count']}: {state_keys}")
+    active_fields = assertions.get("active_checkpoint_fields")
+    if isinstance(active_fields, dict):
+        if checkpoint is None:
+            raise ReplayFailure(f"{label}: no active checkpoint")
+        for field, expected in active_fields.items():
+            if str(expected) not in str(checkpoint[field] or ""):
+                raise ReplayFailure(f"{label}: active checkpoint {field} did not contain {expected!r}")
+
+
+def dump_db_text(db: Any) -> str:
+    chunks: list[str] = []
+    for table in ("events", "notes", "checkpoints", "state"):
+        for row in db.execute(f"SELECT * FROM {table}").fetchall():
+            chunks.append(json.dumps(dict(row), sort_keys=True, default=str))
+    return "\n".join(chunks)
 
 
 def main() -> int:

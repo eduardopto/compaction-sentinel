@@ -23,6 +23,9 @@ Replay fixtures live in `tests/fixtures/scenarios/`:
 - `sensitive_token_redaction.jsonl`
 - `project_switching.jsonl`
 - `stop_auto_continue_loop.jsonl`
+- `mcp_cwd_contract.jsonl`
+- `false_completion_stop_continue.jsonl`
+- `long_noisy_packet_budget.jsonl`
 
 Run one scenario:
 
@@ -30,7 +33,7 @@ Run one scenario:
 python3 scripts/replay_hooks.py tests/fixtures/scenarios/stale_restart_after_compaction.jsonl
 ```
 
-The harness asserts objective preservation, next action preservation, loop warnings, redaction, packet budget, project isolation, and Stop continuation caps.
+The harness asserts objective preservation, next action preservation, loop warnings, redaction, DB contents, state-key cleanup, packet budget, project isolation, MCP `cwd` enforcement, false-completion handling, and Stop continuation caps.
 
 ## Hook Smoke
 
@@ -59,7 +62,7 @@ printf '%s\n' \
   | PYTHONPATH=src python3 -m compaction_sentinel.cli --codex-home /tmp/cs-home mcp
 ```
 
-Expected: initialize response and tools including `compaction_checkpoint`, `compaction_evidence_add`, and `compaction_avoid_add`.
+Expected: initialize response and tools including `compaction_checkpoint`, `compaction_evidence_add`, and `compaction_avoid_add`. Every tool schema should require `cwd`.
 
 ## macOS Install Smoke
 

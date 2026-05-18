@@ -78,6 +78,55 @@ class InstallTests(unittest.TestCase):
             )
             self.assertEqual(doctor(codex_home=home)["auto_continue"], "gentle")
 
+    def test_doctor_parses_hooks_feature_as_toml(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            install(source_root=source_root, codex_home=home, skills_target="codex")
+
+            def write_config(hooks_line: str) -> None:
+                (home / "config.toml").write_text(
+                    "[features]\n"
+                    f"{hooks_line}\n\n"
+                    "[mcp_servers.other]\ncommand = \"other\"\n\n"
+                    "[mcp_servers.compaction_sentinel]\ncommand = \"sentinel\"\nargs = []\n",
+                    encoding="utf-8",
+                )
+
+            write_config("hooks=true")
+            self.assertTrue(doctor(codex_home=home)["hooks_feature_present"])
+            write_config("hooks = true")
+            self.assertTrue(doctor(codex_home=home)["hooks_feature_present"])
+            write_config("hooks = false")
+            status = doctor(codex_home=home)
+            self.assertFalse(status["hooks_feature_present"])
+            self.assertIn("Codex hooks feature is not enabled in config.toml", status["issues"])
+            write_config("# hooks = true")
+            status = doctor(codex_home=home)
+            self.assertFalse(status["hooks_feature_present"])
+
+    def test_doctor_detects_existing_mcp_table_via_toml(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            install(source_root=source_root, codex_home=home, skills_target="codex")
+            (home / "config.toml").write_text(
+                "[features]\nhooks = true\n\n"
+                "[mcp_servers.other]\ncommand = \"other\"\n\n"
+                "# [mcp_servers.compaction_sentinel]\n# command = \"commented\"\n",
+                encoding="utf-8",
+            )
+            status = doctor(codex_home=home)
+            self.assertFalse(status["mcp_present"])
+            self.assertIn("compaction_sentinel MCP config is missing", status["issues"])
+            (home / "config.toml").write_text(
+                "[features]\nhooks = true\n\n"
+                "[mcp_servers.other]\ncommand = \"other\"\n\n"
+                "[mcp_servers.compaction_sentinel]\ncommand = \"sentinel\"\nargs = []\n",
+                encoding="utf-8",
+            )
+            self.assertTrue(doctor(codex_home=home)["mcp_present"])
+
     def test_backup_list_restore_and_purge_uninstall(self) -> None:
         source_root = Path(__file__).resolve().parents[1]
         with tempfile.TemporaryDirectory() as tmp:

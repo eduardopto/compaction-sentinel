@@ -37,7 +37,7 @@ This rewrites Sentinel hook entries, the MCP block, the hooks feature flag, and 
 2. Trust the Compaction Sentinel hooks if Codex asks.
 3. Run `~/.codex/bin/cs doctor --explain`.
 4. Run `codex mcp list` and confirm `compaction_sentinel` appears.
-5. In the project folder, run `~/.codex/bin/cs packet` and confirm a packet prints.
+5. In the project folder, run `~/.codex/bin/cs packet --cwd "$PWD"` and confirm a packet prints.
 
 ## The Skill Does Not Appear
 
@@ -53,7 +53,7 @@ Restart Codex Desktop after install so skill discovery refreshes.
 The installer avoids overwriting a non-Sentinel `~/.codex/bin/cs`. Use the full internal command:
 
 ```bash
-~/.codex/compaction-sentinel/bin/cs status
+~/.codex/compaction-sentinel/bin/cs status --cwd "$PWD"
 ```
 
 `doctor` will warn if `~/.codex/bin/cs` exists but is not owned by Sentinel.
@@ -82,8 +82,8 @@ By default, Sentinel does not force continuation. `gentle` and `strict` are opt-
 ## I Need To Delete Stored Data
 
 ```bash
-~/.codex/bin/cs export --project --output sentinel-export.json
-~/.codex/bin/cs scrub --project
+~/.codex/bin/cs export --project --cwd "$PWD" --output sentinel-export.json
+~/.codex/bin/cs scrub --project --cwd "$PWD"
 ```
 
 To wipe all Sentinel ledger data:

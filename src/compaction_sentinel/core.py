@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "0.3.0"
+VERSION = "0.4.0"
 APP_NAME = "Compaction Sentinel"
 DEFAULT_MAX_PACKET_CHARS = 9000
 DEFAULT_LOOP_THRESHOLD = 3
@@ -91,11 +91,12 @@ def log_path(codex_home: Path | None = None) -> Path:
 
 def default_runtime_config() -> dict[str, Any]:
     return {
-        "version": 2,
+        "version": 3,
         "max_packet_chars": DEFAULT_MAX_PACKET_CHARS,
         "loop_threshold": DEFAULT_LOOP_THRESHOLD,
         "auto_continue": "off",
         "stop_continue_max_per_turn": 1,
+        "stop_continue_max_per_checkpoint_per_turn": 1,
         "stop_continue_cooldown_seconds": 0,
         "max_events_per_project": DEFAULT_MAX_EVENTS_PER_PROJECT,
         "retention_days": DEFAULT_RETENTION_DAYS,
@@ -121,6 +122,22 @@ def load_runtime_config(codex_home: Path | None = None) -> dict[str, Any]:
             merged["version"] = default["version"]
         return merged
     return default
+
+
+def config_int(
+    config: dict[str, Any],
+    key: str,
+    default: int,
+    *,
+    minimum: int | None = None,
+) -> int:
+    try:
+        value = int(config.get(key, default))
+    except (TypeError, ValueError):
+        value = default
+    if minimum is not None and value < minimum:
+        return minimum
+    return value
 
 
 def write_runtime_config(config: dict[str, Any], codex_home: Path | None = None) -> None:
@@ -535,6 +552,23 @@ def event_category(event_name: str, kind: str, summary: str, outcome: str | None
     return kind
 
 
+COMPLETION_NEGATIVE_RE = re.compile(
+    r"(?i)\b("
+    r"not\s+done|not\s+complete|not\s+completed|still\s+failing|still\s+fails|"
+    r"remaining|need\s+to|needs\s+to|blocked|failed|failing|not\s+verified|"
+    r"unverified|could\s+not|can't|cannot|pending|todo|wip"
+    r")\b"
+)
+
+COMPLETION_POSITIVE_RE = re.compile(
+    r"(?i)\b("
+    r"goal\s+complete|marked\s+the\s+goal\s+complete|completed\s+and\s+verified|"
+    r"verified\s+complete|all\s+tests\s+passed|ci\s+is\s+green|ci\s+green|"
+    r"shipped|implemented\s+and\s+verified|done\s+and\s+verified|is\s+complete"
+    r")\b"
+)
+
+
 def is_failure_summary(summary: str, outcome: str | None = None) -> bool:
     if outcome and outcome not in {"0", "success", "succeeded", "ok", "None"}:
         return True
@@ -542,12 +576,12 @@ def is_failure_summary(summary: str, outcome: str | None = None) -> bool:
 
 
 def looks_complete(text: str) -> bool:
-    return bool(
-        re.search(
-            r"(?i)\b(done|complete|completed|fixed|shipped|all tests passed|goal complete|implemented every|ready)\b",
-            text,
-        )
-    )
+    normalized = normalize_text(text, 4000).lower()
+    if not normalized:
+        return False
+    if COMPLETION_NEGATIVE_RE.search(normalized):
+        return False
+    return bool(COMPLETION_POSITIVE_RE.search(normalized))
 
 
 def record_event(
@@ -1315,10 +1349,38 @@ def set_state(db: sqlite3.Connection, key: str, value: str) -> None:
     db.commit()
 
 
-def stop_continue_key(payload: dict[str, Any], checkpoint: sqlite3.Row) -> str:
+def project_state_id(project: Project) -> str:
+    return hash_text(str(project.root.resolve()))[:24]
+
+
+def project_state_prefix(project: Project) -> str:
+    return f"project:{project_state_id(project)}:"
+
+
+def turn_state_id(payload: dict[str, Any]) -> str:
     session_id = str(payload.get("session_id") or "session")
     turn_id = str(payload.get("turn_id") or "turn")
-    return f"stop_continue:{session_id}:{turn_id}:{checkpoint['id']}"
+    return hash_text(f"{session_id}:{turn_id}")[:24]
+
+
+def stop_continue_turn_key(project: Project, payload: dict[str, Any]) -> str:
+    return f"{project_state_prefix(project)}stop_continue:turn:{turn_state_id(payload)}"
+
+
+def stop_continue_checkpoint_key(project: Project, payload: dict[str, Any], checkpoint: sqlite3.Row) -> str:
+    return f"{project_state_prefix(project)}stop_continue:checkpoint:{turn_state_id(payload)}:{checkpoint['id']}"
+
+
+def stop_continue_last_signature_key(project: Project) -> str:
+    return f"{project_state_prefix(project)}stop_continue:last_signature"
+
+
+def stop_continue_next_action_key(project: Project, checkpoint: sqlite3.Row) -> str:
+    return f"{project_state_prefix(project)}stop_continue:next_action:{hash_text(str(checkpoint['next_action'] or ''))[:16]}"
+
+
+def stop_continue_cooldown_key(project: Project) -> str:
+    return f"{project_state_prefix(project)}stop_continue:last_at"
 
 
 def stop_signature(checkpoint: sqlite3.Row) -> str:
@@ -1331,6 +1393,24 @@ def stop_signature(checkpoint: sqlite3.Row) -> str:
             ]
         )
     )[:24]
+
+
+def state_count(db: sqlite3.Connection, key: str) -> int:
+    try:
+        return int(get_state(db, key) or "0")
+    except ValueError:
+        return 0
+
+
+def within_cooldown(last_at: str | None, seconds: int) -> bool:
+    if not last_at or seconds <= 0:
+        return False
+    try:
+        timestamp = dt.datetime.fromisoformat(last_at.replace("Z", "+00:00"))
+    except Exception:
+        return False
+    now = dt.datetime.now(dt.timezone.utc).replace(microsecond=0)
+    return (now - timestamp).total_seconds() < seconds
 
 
 def maybe_stop_continue(
@@ -1347,46 +1427,44 @@ def maybe_stop_continue(
     checkpoint = active_checkpoint(db, project)
     if not checkpoint or checkpoint["status"] == "complete":
         return None
-    max_per_turn = int(config.get("stop_continue_max_per_turn") or 1)
-    key = stop_continue_key(payload, checkpoint)
-    count = int(get_state(db, key) or "0")
-    if count >= max_per_turn:
+    max_per_turn = config_int(config, "stop_continue_max_per_turn", 1, minimum=0)
+    max_per_checkpoint = config_int(config, "stop_continue_max_per_checkpoint_per_turn", 1, minimum=0)
+    if max_per_turn <= 0:
         return None
-    last = extract_last_assistant(payload).lower()
-    completion_markers = (
-        "marked the goal complete",
-        "goal complete",
-        "done",
-        "completed",
-        "all tests passed",
-        "shipped",
-    )
-    if any(marker in last for marker in completion_markers):
+    turn_key = stop_continue_turn_key(project, payload)
+    checkpoint_key = stop_continue_checkpoint_key(project, payload, checkpoint)
+    if state_count(db, turn_key) >= max_per_turn:
+        return None
+    if max_per_checkpoint > 0 and state_count(db, checkpoint_key) >= max_per_checkpoint:
+        return None
+    cooldown_seconds = config_int(config, "stop_continue_cooldown_seconds", 0, minimum=0)
+    if within_cooldown(get_state(db, stop_continue_cooldown_key(project)), cooldown_seconds):
+        return None
+    last = extract_last_assistant(payload)
+    if looks_complete(last):
         return None
     signature = stop_signature(checkpoint)
-    last_signature_key = f"stop_continue:last:{project.root}"
+    last_signature_key = stop_continue_last_signature_key(project)
     if get_state(db, last_signature_key) == signature:
         return None
     if checkpoint["next_action"]:
-        next_action_key = f"stop_continue:next_action:{project.root}:{hash_text(str(checkpoint['next_action']))[:16]}"
+        next_action_key = stop_continue_next_action_key(project, checkpoint)
         if get_state(db, next_action_key) == "used":
             return None
     if loop_warnings(db, project, threshold=int(config.get("loop_threshold") or DEFAULT_LOOP_THRESHOLD)):
         return None
-    set_state(db, key, str(count + 1))
+    set_state(db, turn_key, str(state_count(db, turn_key) + 1))
+    set_state(db, checkpoint_key, str(state_count(db, checkpoint_key) + 1))
     set_state(db, last_signature_key, signature)
+    set_state(db, stop_continue_cooldown_key(project), utc_now())
     if checkpoint["next_action"]:
-        set_state(
-            db,
-            f"stop_continue:next_action:{project.root}:{hash_text(str(checkpoint['next_action']))[:16]}",
-            "used",
-        )
+        set_state(db, stop_continue_next_action_key(project, checkpoint), "used")
     reason = build_resume_packet(
         db,
         project,
         reason="stop-continuation",
         max_chars=min(int(config.get("max_packet_chars") or DEFAULT_MAX_PACKET_CHARS), 6500),
-        loop_threshold=int(config.get("loop_threshold") or DEFAULT_LOOP_THRESHOLD),
+        loop_threshold=config_int(config, "loop_threshold", DEFAULT_LOOP_THRESHOLD, minimum=1),
     )
     reason += "\n\nContinue this active objective. First state the next concrete action, then perform it."
     if policy == "strict":
@@ -1412,10 +1490,10 @@ def _handle_hook(
     redact = bool(config.get("redact", True))
     project = project_from_payload(payload)
     event_name = event_name or str(payload.get("hook_event_name") or "")
-    loop_threshold = int(config.get("loop_threshold") or DEFAULT_LOOP_THRESHOLD)
-    max_chars = int(config.get("max_packet_chars") or DEFAULT_MAX_PACKET_CHARS)
-    max_events = int(config.get("max_events_per_project") or DEFAULT_MAX_EVENTS_PER_PROJECT)
-    retention_days = int(config.get("retention_days") or DEFAULT_RETENTION_DAYS)
+    loop_threshold = config_int(config, "loop_threshold", DEFAULT_LOOP_THRESHOLD, minimum=1)
+    max_chars = config_int(config, "max_packet_chars", DEFAULT_MAX_PACKET_CHARS, minimum=500)
+    max_events = config_int(config, "max_events_per_project", DEFAULT_MAX_EVENTS_PER_PROJECT, minimum=0)
+    retention_days = config_int(config, "retention_days", DEFAULT_RETENTION_DAYS, minimum=0)
 
     if event_name == "UserPromptSubmit":
         prompt = extract_prompt(payload, redact=redact)
@@ -1631,6 +1709,23 @@ def scrub_project(db: sqlite3.Connection, project: Project) -> dict[str, int]:
         ).fetchone()
         counts[table] = int(row["count"] if row else 0)
         db.execute(f"DELETE FROM {table} WHERE project_root = ?", (str(project.root),))
+    state_keys = {
+        str(row["key"])
+        for row in db.execute(
+            "SELECT key FROM state WHERE key LIKE ?",
+            (project_state_prefix(project) + "%",),
+        ).fetchall()
+    }
+    # Remove legacy v0.3 keys that stored the raw project path.
+    raw_root = str(project.root)
+    state_keys.update(
+        str(row["key"])
+        for row in db.execute("SELECT key FROM state").fetchall()
+        if raw_root in str(row["key"])
+    )
+    counts["state"] = len(state_keys)
+    for key in state_keys:
+        db.execute("DELETE FROM state WHERE key = ?", (key,))
     db.commit()
     return counts
 
