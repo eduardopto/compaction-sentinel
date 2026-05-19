@@ -27,6 +27,8 @@ Replay fixtures live in `tests/fixtures/scenarios/`:
 - `false_completion_stop_continue.jsonl`
 - `long_noisy_packet_budget.jsonl`
 
+The packet priority unit tests also verify that 500, 1000, and 2000 character packets preserve the active objective, next action, blockers, strongest evidence, do-not-repeat warning, and resume contract while dropping optional recent event trail data first.
+
 Run one scenario:
 
 ```bash

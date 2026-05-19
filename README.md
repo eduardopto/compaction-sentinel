@@ -31,7 +31,7 @@ With Sentinel:
 Example packet excerpt:
 
 ```xml
-<compaction-sentinel version="0.4.0" schema="packet-v2" reason="session-start">
+<compaction-sentinel version="0.4.1" schema="packet-v2" reason="session-start">
   <active_objective>
   status: active
   objective: Finish auth repair and device verification
@@ -56,6 +56,12 @@ Example packet excerpt:
 - Replay evals for stale restarts, repeated failures, objective changes, tool-output blindness, redaction, project switching, and Stop continuation loops.
 - Secret redaction for OpenAI keys, GitHub PATs, AWS keys, Google API keys, Slack tokens, JWTs, private keys, bearer tokens, env-style secrets, and high-entropy values.
 - Fail-open hooks. If Sentinel crashes, Codex work continues.
+
+## Dogfood Results
+
+Internal dogfood now covers the Python package itself, a React/Electron app, an iOS/Capacitor app, and a large Unity repo for explicit `cwd` project resolution. The replay contract measures stale restart recovery, repeated loop detection, next-action preservation, false-completion handling, redaction, tiny packet budgets, and a 120-event noisy run.
+
+See [Dogfood Results](docs/DOGFOOD.md) for the measured table and limitations.
 
 ## Install
 
@@ -175,6 +181,15 @@ The repo includes a Codex plugin shape:
 
 Recommended install is still the user-level installer. Current Codex releases load user-level hooks by default, while plugin-bundled hooks require `plugin_hooks = true`.
 
+## Known Limitations
+
+- Sentinel cannot control or replace OpenAI server-side compaction.
+- Hook coverage is a continuity guardrail, not a security boundary for every possible tool path.
+- Codex Desktop may need a restart, and sometimes hook trust approval, before newly installed hooks are active.
+- Redaction is best effort. Do not paste secrets into Codex prompts if you can avoid it.
+- Auto-continue is off by default because forced continuation can be risky in destructive or ambiguous tasks.
+- Dogfood results are internal and replay-backed, not an independent third-party benchmark.
+
 ## Development
 
 ```bash
@@ -195,6 +210,7 @@ Replay scenarios live in [tests/fixtures/scenarios](tests/fixtures/scenarios). T
 - [Data retention](docs/DATA_RETENTION.md)
 - [Security](docs/SECURITY.md)
 - [Verification](docs/VERIFICATION.md)
+- [Dogfood Results](docs/DOGFOOD.md)
 - [Roadmap](ROADMAP.md)
 
 ## Sources Behind The Design

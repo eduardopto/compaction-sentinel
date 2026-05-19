@@ -348,6 +348,86 @@ class CoreTests(unittest.TestCase):
             )
             self.assertEqual(out, {})
 
+    def test_invalid_numeric_runtime_config_does_not_crash_hooks(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            config_path = home / "compaction-sentinel" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps(
+                    {
+                        "auto_continue": "gentle",
+                        "loop_threshold": "bad",
+                        "max_packet_chars": "bad",
+                        "max_events_per_project": "bad",
+                        "retention_days": "bad",
+                        "stop_continue_max_per_turn": "bad",
+                        "stop_continue_cooldown_seconds": "bad",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            payload_project = project_from_payload({"cwd": str(project)})
+            db = connect(home)
+            save_checkpoint(db, payload_project, objective="Finish verification", next_action="Run check")
+            db.close()
+            out = handle_hook(
+                "Stop",
+                {"cwd": str(project), "session_id": "s1", "turn_id": "t1", "last_assistant_message": "Still working."},
+                codex_home=home,
+            )
+            self.assertEqual(out.get("decision"), "block")
+
+    def test_tiny_packet_budgets_preserve_priority_fields(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            project_path.mkdir()
+            (project_path / ".git").mkdir()
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            save_checkpoint(
+                db,
+                project,
+                objective="Tiny objective",
+                current_step="A lot of less important current-state detail should be dropped first.",
+                next_action="Run final check",
+                blockers="Device locked",
+                tests_passed="Strong proof passed",
+                do_not_repeat="",
+            )
+            db.close()
+            for index in range(3):
+                handle_hook(
+                    "PreToolUse",
+                    {
+                        "cwd": str(project_path),
+                        "session_id": "s1",
+                        "turn_id": "t1",
+                        "tool_use_id": f"tiny-{index}",
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "pytest tests/tiny_budget.py"},
+                    },
+                    codex_home=home,
+                )
+            db = connect(home)
+            try:
+                for budget in (500, 1000, 2000):
+                    packet = build_resume_packet(db, project, max_chars=budget)
+                    self.assertLessEqual(len(packet), budget)
+                    self.assertIn("Tiny objective", packet)
+                    self.assertIn("Run final check", packet)
+                    self.assertIn("Device locked", packet)
+                    self.assertIn("Strong proof passed", packet)
+                    self.assertIn("Same command loop", packet)
+                    self.assertIn("<resume_contract>", packet)
+                    self.assertNotIn("<recent_event_trail>", packet)
+            finally:
+                db.close()
+
     def test_completion_detection_rejects_partial_completion(self) -> None:
         self.assertTrue(looks_complete("All tests passed and CI is green."))
         self.assertFalse(looks_complete("Done with the first pass, but tests are still failing."))

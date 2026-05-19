@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "0.4.0"
+VERSION = "0.4.1"
 APP_NAME = "Compaction Sentinel"
 DEFAULT_MAX_PACKET_CHARS = 9000
 DEFAULT_LOOP_THRESHOLD = 3
@@ -1138,13 +1138,19 @@ def dedupe_keep_order(items: Iterable[str]) -> list[str]:
 
 
 def compact_lines(lines: Iterable[str], max_chars: int) -> str:
+    marker = "...[packet truncated to stay compact]"
     out: list[str] = []
     used = 0
     for line in lines:
         line = line.rstrip()
         cost = len(line) + 1
         if used + cost > max_chars:
-            out.append("...[packet truncated to stay compact]")
+            marker_cost = len(marker) + 1
+            while out and used + marker_cost > max_chars:
+                removed = out.pop()
+                used -= len(removed) + 1
+            if used + marker_cost <= max_chars:
+                out.append(marker)
             break
         out.append(line)
         used += cost
@@ -1173,6 +1179,120 @@ def bullet_lines(text: str | None, *, fallback: str | None = None) -> list[str]:
         item = item[2:].strip() if item.startswith("- ") else item
         lines.append(f"- {escape_packet_text(item)}")
     return lines
+
+
+def trim_packet_text(value: Any, limit: int) -> str:
+    text = re.sub(r"\s+", " ", escape_packet_text(value)).strip()
+    if len(text) <= limit:
+        return text
+    if limit <= 14:
+        return text[:limit]
+    return text[: limit - 14].rstrip() + " ...[cut]"
+
+
+def first_packet_line(text: str | None, *, fallback: str, limit: int) -> str:
+    raw = str(text or "").strip()
+    if not raw:
+        return trim_packet_text(fallback, limit)
+    for part in raw.splitlines():
+        item = part.strip()
+        if item:
+            item = item[2:].strip() if item.startswith("- ") else item
+            return trim_packet_text(item, limit)
+    return trim_packet_text(fallback, limit)
+
+
+def strongest_evidence_line(checkpoint: sqlite3.Row | None, *, limit: int) -> str:
+    if not checkpoint:
+        return "No verification evidence recorded yet."
+    for field in ("tests_passed", "evidence", "commands_run", "files_touched"):
+        value = first_packet_line(checkpoint[field], fallback="", limit=limit)
+        if value:
+            return value
+    return "No verification evidence recorded yet."
+
+
+def strongest_blocker_line(checkpoint: sqlite3.Row | None, *, limit: int) -> str:
+    if not checkpoint:
+        return "None recorded."
+    for field in ("tests_failed", "blockers"):
+        value = first_packet_line(checkpoint[field], fallback="", limit=limit)
+        if value:
+            return value
+    return "None recorded."
+
+
+def strongest_do_not_repeat_line(
+    checkpoint: sqlite3.Row | None,
+    warnings: list[str],
+    *,
+    limit: int,
+) -> str:
+    items: list[str] = []
+    if checkpoint:
+        value = first_packet_line(checkpoint["do_not_repeat"], fallback="", limit=max(limit, 40))
+        if value:
+            items.append(value)
+    if warnings:
+        items.append(trim_packet_text(warnings[0], max(limit, 40)))
+    if not items:
+        items.append("No repeat warning recorded.")
+    return trim_packet_text(" | ".join(items), limit)
+
+
+def priority_resume_packet(
+    *,
+    checkpoint: sqlite3.Row | None,
+    warnings: list[str],
+    reason: str,
+    max_chars: int,
+) -> str:
+    objective = (
+        f"status: {trim_packet_text(checkpoint['status'], 16)}; objective: {trim_packet_text(checkpoint['objective'], 72)}"
+        if checkpoint
+        else "status: none; objective: No checkpoint recorded yet."
+    )
+    next_action = (
+        trim_packet_text(checkpoint["next_action"] or "Verify current files, then continue the active objective.", 82)
+        if checkpoint
+        else "Infer the live objective and save a checkpoint."
+    )
+    blocker = strongest_blocker_line(checkpoint, limit=72)
+    evidence = strongest_evidence_line(checkpoint, limit=72)
+    avoid = strongest_do_not_repeat_line(checkpoint, warnings, limit=84)
+    lines = [
+        f'<compaction-sentinel version="{VERSION}" schema="packet-v2" reason="{trim_packet_text(reason, 32)}">',
+        f"<active_objective>{objective}</active_objective>",
+        f"<next_action>{next_action}</next_action>",
+        f"<blockers>- {blocker}</blockers>",
+        f"<evidence>- {evidence}</evidence>",
+        f"<do_not_repeat>- {avoid}</do_not_repeat>",
+        "<resume_contract>Continue live objective; do not restart; verify latest output before completion.</resume_contract>",
+        "</compaction-sentinel>",
+    ]
+    packet = "\n".join(lines)
+    if len(packet) <= max_chars:
+        return packet
+    for limit in (56, 44, 32, 24):
+        objective = (
+            f"status: {trim_packet_text(checkpoint['status'], 10)}; objective: {trim_packet_text(checkpoint['objective'], limit)}"
+            if checkpoint
+            else "status: none; objective: No checkpoint."
+        )
+        lines = [
+            f'<compaction-sentinel version="{VERSION}" schema="packet-v2" reason="{trim_packet_text(reason, 20)}">',
+            f"<active_objective>{objective}</active_objective>",
+            f"<next_action>{trim_packet_text(next_action, limit)}</next_action>",
+            f"<blockers>- {strongest_blocker_line(checkpoint, limit=limit)}</blockers>",
+            f"<evidence>- {strongest_evidence_line(checkpoint, limit=limit)}</evidence>",
+            f"<do_not_repeat>- {strongest_do_not_repeat_line(checkpoint, warnings, limit=limit)}</do_not_repeat>",
+            "<resume_contract>Continue live work; do not restart; verify before completion.</resume_contract>",
+            "</compaction-sentinel>",
+        ]
+        packet = "\n".join(lines)
+        if len(packet) <= max_chars:
+            return packet
+    return compact_lines(lines, max_chars=max_chars)
 
 
 def build_resume_packet(
@@ -1317,6 +1437,13 @@ def build_resume_packet(
             "</compaction-sentinel>",
         ]
     )
+    if max_chars <= 2500:
+        return priority_resume_packet(
+            checkpoint=checkpoint,
+            warnings=warnings,
+            reason=reason,
+            max_chars=max_chars,
+        )
     return compact_lines(lines, max_chars=max_chars)
 
 
@@ -1451,7 +1578,7 @@ def maybe_stop_continue(
         next_action_key = stop_continue_next_action_key(project, checkpoint)
         if get_state(db, next_action_key) == "used":
             return None
-    if loop_warnings(db, project, threshold=int(config.get("loop_threshold") or DEFAULT_LOOP_THRESHOLD)):
+    if loop_warnings(db, project, threshold=config_int(config, "loop_threshold", DEFAULT_LOOP_THRESHOLD, minimum=1)):
         return None
     set_state(db, turn_key, str(state_count(db, turn_key) + 1))
     set_state(db, checkpoint_key, str(state_count(db, checkpoint_key) + 1))
@@ -1463,7 +1590,7 @@ def maybe_stop_continue(
         db,
         project,
         reason="stop-continuation",
-        max_chars=min(int(config.get("max_packet_chars") or DEFAULT_MAX_PACKET_CHARS), 6500),
+        max_chars=min(config_int(config, "max_packet_chars", DEFAULT_MAX_PACKET_CHARS, minimum=500), 6500),
         loop_threshold=config_int(config, "loop_threshold", DEFAULT_LOOP_THRESHOLD, minimum=1),
     )
     reason += "\n\nContinue this active objective. First state the next concrete action, then perform it."

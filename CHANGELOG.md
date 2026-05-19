@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.1
+
+- Adds an internal dogfood report with real project-shape coverage, measured replay outcomes, and explicit limitations.
+- Adds tiny-budget packet priority tests for 500, 1000, and 2000 character packets.
+- Uses config-safe integer parsing for remaining Stop-continuation loop-threshold and packet-budget paths.
+- Hardens packet compaction so tiny packets preserve objective, next action, blockers, strongest evidence, do-not-repeat warning, and resume contract.
+- Adds a visible README Known Limitations section.
+- Expands the noisy replay budget scenario to 120 tool-result events.
+
 ## 0.4.0
 
 - Establishes the Reliability Contract release: correctness and Codex Desktop compatibility over new surface area.
