@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.2
+
+- Makes PostToolUse failure detection command-aware so read-only `cat`, `sed`, `rg`, `git show`, `json.tool`, and similar commands are not marked failed merely because file contents mention "failed", "exception", or traceback examples.
+- Anchors read-only command failures to real command-output errors while still catching validation failures from `jq`, `rg`, and `python -m json.tool`.
+- Keeps real failures covered through nonzero structured outcomes, shell/read errors, traceback/error prefixes, and test/build output from pytest, unittest, npm, xcodebuild, Swift, Cargo, Go, and similar commands.
+- Stops repeated non-failure PostToolUse results from producing noisy loop warnings; PreToolUse command-loop and investigation-loop guards still catch repeated action patterns.
+- Reclassifies existing ledger event categories on upgrade so old false-positive `tool_failure` rows do not keep surfacing in packets.
+- Adds unit and replay regression coverage for false-positive doc/source reads versus real repeated test failures.
+
 ## 0.4.1
 
 - Adds an internal dogfood report with real project-shape coverage, measured replay outcomes, and explicit limitations.

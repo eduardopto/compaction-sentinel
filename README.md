@@ -31,7 +31,7 @@ With Sentinel:
 Example packet excerpt:
 
 ```xml
-<compaction-sentinel version="0.4.1" schema="packet-v2" reason="session-start">
+<compaction-sentinel version="0.4.2" schema="packet-v2" reason="session-start">
   <active_objective>
   status: active
   objective: Finish auth repair and device verification
@@ -53,7 +53,7 @@ Example packet excerpt:
 - MCP tools: `compaction_checkpoint`, `compaction_evidence_add`, `compaction_avoid_add`, `compaction_note`, `compaction_packet`, `compaction_search`, and `compaction_status`.
 - A strict MCP `cwd` contract so every tool call targets an explicit project.
 - CLI commands for checkpoints, evidence, avoid-list items, scrub/export, retention, config, backups, doctor repair, and uninstall.
-- Replay evals for stale restarts, repeated failures, objective changes, tool-output blindness, redaction, project switching, and Stop continuation loops.
+- Replay evals for stale restarts, repeated failures, false-positive doc/source reads, objective changes, tool-output blindness, redaction, project switching, and Stop continuation loops.
 - Secret redaction for OpenAI keys, GitHub PATs, AWS keys, Google API keys, Slack tokens, JWTs, private keys, bearer tokens, env-style secrets, and high-entropy values.
 - Fail-open hooks. If Sentinel crashes, Codex work continues.
 

@@ -10,8 +10,10 @@ from compaction_sentinel.core import (
     active_checkpoint,
     build_resume_packet,
     connect,
+    event_category,
     get_state,
     handle_hook,
+    is_failure_summary,
     looks_complete,
     project_from_payload,
     project_state_prefix,
@@ -380,6 +382,108 @@ class CoreTests(unittest.TestCase):
                 codex_home=home,
             )
             self.assertEqual(out.get("decision"), "block")
+
+    def test_reading_docs_with_failure_words_is_not_tool_failure(self) -> None:
+        summary = (
+            "Bash: sed -n '1,120p' docs/guard.md -> "
+            "This guard prevents failed loops, exceptions, traceback text, and false failure claims."
+        )
+        self.assertFalse(is_failure_summary(summary))
+        self.assertEqual(event_category("PostToolUse", "tool-result:Bash", summary), "tool_result")
+
+    def test_read_only_command_real_file_error_is_failure(self) -> None:
+        summary = "Bash: sed -n '1,120p' missing.md -> sed: missing.md: No such file or directory"
+        self.assertTrue(is_failure_summary(summary))
+        self.assertEqual(event_category("PostToolUse", "tool-result:Bash", summary), "tool_failure")
+        self.assertTrue(is_failure_summary("Bash: git show missing-ref -> fatal: ambiguous argument 'missing-ref'"))
+
+    def test_test_command_failure_still_counts_as_failure(self) -> None:
+        summary = "Bash: pytest tests/test_app.py -> FAILED tests/test_app.py::test_save - AssertionError"
+        self.assertTrue(is_failure_summary(summary))
+        self.assertEqual(event_category("PostToolUse", "tool-result:Bash", summary), "tool_failure")
+
+    def test_test_command_zero_failed_is_success_not_failure(self) -> None:
+        summary = "Bash: pytest tests/test_app.py -> 61 passed, 0 failed, 22 skipped"
+        self.assertFalse(is_failure_summary(summary))
+        self.assertEqual(event_category("PostToolUse", "tool-result:Bash", summary), "tool_success")
+        self.assertFalse(is_failure_summary("Bash: pytest tests/test_app.py -> 0 failed"))
+        self.assertFalse(is_failure_summary("Bash: pytest tests/test_app.py -> no tests failed"))
+
+    def test_read_only_validation_errors_still_count_as_failures(self) -> None:
+        cases = [
+            "Bash: jq . bad.json -> parse error: Invalid numeric literal at line 1, column 7",
+            "Bash: python -m json.tool bad.json -> Expecting value: line 1 column 1 (char 0)",
+            "Bash: rg '[' src -> regex parse error: unclosed character class",
+        ]
+        for summary in cases:
+            with self.subTest(summary=summary):
+                self.assertTrue(is_failure_summary(summary))
+
+    def test_reading_source_error_examples_is_not_failure(self) -> None:
+        summary = (
+            "Bash: sed -n '1,160p' docs/guard.md -> "
+            "Example output: sed: missing.md: No such file or directory. "
+            "Example output: parse error: Invalid numeric literal."
+        )
+        self.assertFalse(is_failure_summary(summary))
+
+    def test_repeated_doc_reads_do_not_emit_failure_loop_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            response = (
+                "This source file contains words like failed, exception, traceback, "
+                "fatal, and error as examples, but the read command succeeded."
+            )
+            out: dict[str, object] = {}
+            for index in range(3):
+                out = handle_hook(
+                    "PostToolUse",
+                    {
+                        "cwd": str(project),
+                        "session_id": "s1",
+                        "turn_id": "t1",
+                        "tool_use_id": f"doc-{index}",
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "sed -n '1,120p' docs/guard.md"},
+                        "tool_response": response,
+                    },
+                    codex_home=home,
+                )
+            self.assertEqual(out, {})
+            db = connect(home)
+            categories = [
+                row["category"]
+                for row in db.execute("SELECT category FROM events ORDER BY id").fetchall()
+            ]
+            db.close()
+            self.assertEqual(categories, ["tool_result", "tool_result", "tool_result"])
+
+    def test_repeated_test_failures_still_emit_failure_loop_warning(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            out: dict[str, object] = {}
+            for index in range(3):
+                out = handle_hook(
+                    "PostToolUse",
+                    {
+                        "cwd": str(project),
+                        "session_id": "s1",
+                        "turn_id": "t1",
+                        "tool_use_id": f"test-{index}",
+                        "tool_name": "Bash",
+                        "tool_input": {"command": "pytest tests/test_app.py"},
+                        "tool_response": "FAILED tests/test_app.py::test_save - AssertionError",
+                    },
+                    codex_home=home,
+                )
+            text = json.dumps(out)
+            self.assertIn("Same failure loop", text)
 
     def test_tiny_packet_budgets_preserve_priority_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

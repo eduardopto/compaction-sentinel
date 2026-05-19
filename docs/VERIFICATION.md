@@ -26,6 +26,7 @@ Replay fixtures live in `tests/fixtures/scenarios/`:
 - `mcp_cwd_contract.jsonl`
 - `false_completion_stop_continue.jsonl`
 - `long_noisy_packet_budget.jsonl`
+- `doc_source_read_false_failure.jsonl`
 
 The packet priority unit tests also verify that 500, 1000, and 2000 character packets preserve the active objective, next action, blockers, strongest evidence, do-not-repeat warning, and resume contract while dropping optional recent event trail data first.
 
@@ -35,7 +36,7 @@ Run one scenario:
 python3 scripts/replay_hooks.py tests/fixtures/scenarios/stale_restart_after_compaction.jsonl
 ```
 
-The harness asserts objective preservation, next action preservation, loop warnings, redaction, DB contents, state-key cleanup, packet budget, project isolation, MCP `cwd` enforcement, false-completion handling, and Stop continuation caps.
+The harness asserts objective preservation, next action preservation, loop warnings, redaction, DB contents, event category counts, state-key cleanup, packet budget, project isolation, MCP `cwd` enforcement, false-completion handling, false-positive doc/source read handling, and Stop continuation caps.
 
 ## Hook Smoke
 

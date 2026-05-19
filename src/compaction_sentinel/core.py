@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "0.4.1"
+VERSION = "0.4.2"
 APP_NAME = "Compaction Sentinel"
 DEFAULT_MAX_PACKET_CHARS = 9000
 DEFAULT_LOOP_THRESHOLD = 3
@@ -23,6 +23,16 @@ DEFAULT_RECENT_EVENT_LIMIT = 18
 DEFAULT_MAX_EVENTS_PER_PROJECT = 1200
 DEFAULT_RETENTION_DAYS = 30
 SENSITIVE_VALUE = "[redacted]"
+REPEAT_WARNING_CATEGORIES = {
+    "tool_call",
+    "tool_failure",
+    "stale_restart_signal",
+    "oscillation_or_revert_risk",
+    "completion_claim",
+    "investigation",
+    "permission_request",
+    "prompt",
+}
 
 CHECKPOINT_TEXT_FIELDS = (
     "acceptance_criteria",
@@ -253,6 +263,7 @@ def init_db(db: sqlite3.Connection) -> None:
           WHERE event_key IS NOT NULL
         """
     )
+    migrate_event_categories(db)
     db.execute("PRAGMA busy_timeout=2000;")
     db.commit()
 
@@ -262,6 +273,25 @@ def migrate_columns(db: sqlite3.Connection, table: str, columns: dict[str, str])
     for name, sql_type in columns.items():
         if name not in existing:
             db.execute(f"ALTER TABLE {table} ADD COLUMN {name} {sql_type}")
+
+
+def migrate_event_categories(db: sqlite3.Connection) -> None:
+    row = db.execute("PRAGMA user_version").fetchone()
+    if row and int(row[0]) >= 4:
+        return
+    rows = db.execute(
+        "SELECT id, event_name, kind, summary, outcome, category FROM events ORDER BY id"
+    ).fetchall()
+    for event in rows:
+        category = event_category(
+            str(event["event_name"] or ""),
+            str(event["kind"] or ""),
+            str(event["summary"] or ""),
+            event["outcome"],
+        )
+        if category != str(event["category"] or ""):
+            db.execute("UPDATE events SET category = ? WHERE id = ?", (category, event["id"]))
+    db.execute("PRAGMA user_version = 4")
 
 
 def read_json_stdin() -> dict[str, Any]:
@@ -542,7 +572,7 @@ def event_category(event_name: str, kind: str, summary: str, outcome: str | None
     if event_name == "PostToolUse":
         if is_failure_summary(summary, outcome):
             return "tool_failure"
-        if re.search(r"\b(pass|passed|success|succeeded|0 failed)\b", lowered):
+        if is_success_summary(summary, outcome):
             return "tool_success"
         return "tool_result"
     if event_name == "Stop":
@@ -569,10 +599,137 @@ COMPLETION_POSITIVE_RE = re.compile(
 )
 
 
-def is_failure_summary(summary: str, outcome: str | None = None) -> bool:
-    if outcome and outcome not in {"0", "success", "succeeded", "ok", "None"}:
+SUCCESS_OUTCOMES = {"0", "success", "succeeded", "ok", "none", "true", "completed"}
+FAILURE_OUTCOME_RE = re.compile(
+    r"(?i)(?:^|[\s,{])(?:exit[_ -]?code|return[_ -]?code|returncode|status|code)[\"']?\s*[:=]\s*[1-9]\d*"
+)
+READ_ONLY_COMMAND_RE = re.compile(
+    r"(?is)^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*"
+    r"(?:(?:cat|sed|awk|grep|rg|find|ls|head|tail|nl|wc|file|stat|du|tree|less|more)\b|"
+    r"git\s+(?:show|diff|status|log|rev-parse|ls-files|branch|tag|describe|remote|config)\b|"
+    r"python3?\s+-m\s+json\.tool\b|"
+    r"jq\b|"
+    r"sqlite3\b.*\bselect\b)"
+)
+TEST_OR_BUILD_COMMAND_RE = re.compile(
+    r"(?is)\b("
+    r"pytest|unittest|tox|nox|coverage|make(?:\s+\S*)?\s+(?:test|tests|check|compile|build|replay)|"
+    r"npm\s+(?:test|run\s+(?:test|build|lint|typecheck))|"
+    r"pnpm\s+(?:test|run\s+(?:test|build|lint|typecheck))|"
+    r"yarn\s+(?:test|run\s+(?:test|build|lint|typecheck))|"
+    r"vitest|jest|mocha|playwright|xcodebuild|swift\s+test|cargo\s+test|go\s+test|"
+    r"mvn\s+test|gradle\s+test|ruff|mypy|tsc|eslint"
+    r")\b"
+)
+READ_ONLY_FAILURE_RE = re.compile(
+    r"(?i)^\s*("
+    r"(?:zsh|bash|sh):\d*:|"
+    r"(?:cat|sed|awk|grep|rg|find|ls|head|tail|nl|wc|file|stat|du|tree|python(?:3)?|jq|sqlite3):\s+"
+    r"(?:[^:]{1,240}:\s+)?"
+    r"(?:can't open|cannot open|no such file|permission denied|operation not permitted|not found|fatal|error)|"
+    r"can't open file|no such file or directory|permission denied|operation not permitted|not a directory|is a directory|"
+    r"fatal:\s+not a git repository"
+    r")"
+)
+READ_ONLY_VALIDATION_FAILURE_RE = re.compile(
+    r"(?i)^\s*(parse error:|regex parse error:|json\.decoder\.jsondecodeerror|"
+    r"expecting value:\s+line\s+\d+\s+column\s+\d+)"
+)
+EXECUTION_FAILURE_RE = re.compile(
+    r"(?i)(?:^|\s)("
+    r"traceback \(most recent call last\)|assertionerror|moduleNotFoundError|importError|syntaxError|"
+    r"typeError|valueError|uncaught exception|segmentation fault|command not found|"
+    r"build failed|compilation failed|fatal error|error:"
+    r")(?:\s|$|:)"
+)
+TEST_FAILURE_RE = re.compile(
+    r"(?i)(?:^|\s)("
+    r"FAILED\b|ERROR\b|tests?\s+failed|failed\s+tests?|[1-9]\d*\s+failed|"
+    r"failures?[=:]\s*[1-9]\d*|errors?[=:]\s*[1-9]\d*|"
+    r"assertionerror|traceback \(most recent call last\)|build failed|compilation failed"
+    r")(?:\s|$|:)"
+)
+ZERO_FAILURE_COUNT_RE = re.compile(
+    r"(?i)\b(?:0|zero|no)\s+(?:tests?\s+)?(?:failed|failures?|errors?|failed\s+tests?)\b|"
+    r"\b(?:no|zero)\s+tests?\s+failed\b"
+)
+
+
+def tool_summary_parts(summary: str) -> tuple[str, str, str]:
+    left, sep, response = summary.partition(" -> ")
+    if ": " in left:
+        tool_name, tool_input = left.split(": ", 1)
+    else:
+        tool_name, tool_input = "", left
+    return tool_name.strip(), tool_input.strip(), response.strip() if sep else ""
+
+
+def normalized_outcome(outcome: str | None) -> str:
+    return str(outcome or "").strip().lower()
+
+
+def outcome_indicates_failure(outcome: str | None) -> bool:
+    value = normalized_outcome(outcome)
+    if not value or value in SUCCESS_OUTCOMES:
+        return False
+    if value.isdigit():
+        return int(value) != 0
+    if FAILURE_OUTCOME_RE.search(value):
         return True
-    return bool(re.search(r"(?i)\b(error|failed|failure|traceback|exception|fatal|exit_code[\"']?:\s*[1-9])\b", summary))
+    return bool(re.search(r"(?i)\b(fail|failed|failure|error|fatal|denied|timeout|cancelled)\b", value))
+
+
+def outcome_indicates_success(outcome: str | None) -> bool:
+    return normalized_outcome(outcome) in SUCCESS_OUTCOMES
+
+
+def is_read_only_command(command: str) -> bool:
+    return bool(READ_ONLY_COMMAND_RE.search(command or ""))
+
+
+def is_test_or_build_command(command: str) -> bool:
+    return bool(TEST_OR_BUILD_COMMAND_RE.search(command or ""))
+
+
+def read_only_response_failed(command: str, response: str) -> bool:
+    if READ_ONLY_FAILURE_RE.search(response):
+        return True
+    lowered = command.lower()
+    if re.search(r"^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*git\b", lowered):
+        return bool(re.search(r"(?i)^\s*(fatal|error):\s+", response))
+    if re.search(r"^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*jq\b", lowered):
+        return bool(READ_ONLY_VALIDATION_FAILURE_RE.search(response))
+    if re.search(r"^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*rg\b", lowered):
+        return bool(READ_ONLY_VALIDATION_FAILURE_RE.search(response))
+    if re.search(r"^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*python3?\s+-m\s+json\.tool\b", lowered):
+        return bool(READ_ONLY_VALIDATION_FAILURE_RE.search(response))
+    return False
+
+
+def is_failure_summary(summary: str, outcome: str | None = None) -> bool:
+    if outcome_indicates_failure(outcome):
+        return True
+    if FAILURE_OUTCOME_RE.search(summary):
+        return True
+    _tool_name, command, response = tool_summary_parts(summary)
+    haystack = response or summary
+    if is_read_only_command(command):
+        return read_only_response_failed(command, haystack)
+    if EXECUTION_FAILURE_RE.search(haystack):
+        return True
+    if is_test_or_build_command(command):
+        test_haystack = ZERO_FAILURE_COUNT_RE.sub(" ", haystack)
+        return bool(TEST_FAILURE_RE.search(test_haystack))
+    return False
+
+
+def is_success_summary(summary: str, outcome: str | None = None) -> bool:
+    if outcome_indicates_success(outcome):
+        return True
+    _tool_name, command, response = tool_summary_parts(summary)
+    if not is_test_or_build_command(command):
+        return False
+    return bool(re.search(r"(?i)\b(all tests passed|passed|success|succeeded|0 failed)\b", response or summary))
 
 
 def looks_complete(text: str) -> bool:
@@ -1026,6 +1183,8 @@ def regression_warnings(
         last = db.execute("SELECT summary, category FROM events WHERE id = ?", (row["last_id"],)).fetchone()
         summary = str(last["summary"] if last else "")
         category = str(last["category"] if last else "repeat")
+        if category not in REPEAT_WARNING_CATEGORIES:
+            continue
         warnings.append(f"{warning_label(category)} repeated {row['count']} times: {summary[:220]}")
     warnings.extend(failure_loop_warnings(db, project, threshold=threshold))
     warnings.extend(investigation_loop_warnings(db, project, threshold=max(threshold + 1, 4)))

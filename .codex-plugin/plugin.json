@@ -1,6 +1,6 @@
 {
   "name": "compaction-sentinel",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "Codex Desktop continuity hooks, skill, and MCP tools that preserve active work across compaction.",
   "author": {
     "name": "Eduardo Castillo"

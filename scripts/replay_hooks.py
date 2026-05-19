@@ -223,6 +223,18 @@ def run_assertions(
                 (str(project.root),),
             ).fetchone()["count"]
         )
+        category_counts = {
+            str(row["category"]): int(row["count"])
+            for row in db.execute(
+                """
+                SELECT category, COUNT(*) AS count
+                FROM events
+                WHERE project_root = ?
+                GROUP BY category
+                """,
+                (str(project.root),),
+            ).fetchall()
+        }
         state_keys = [str(row["key"]) for row in db.execute("SELECT key FROM state ORDER BY key").fetchall()]
     finally:
         db.close()
@@ -262,6 +274,13 @@ def run_assertions(
         raise ReplayFailure(f"{label}: event count {event_count} != {assertions['db_event_count']}")
     if "db_event_count_at_least" in assertions and event_count < int(assertions["db_event_count_at_least"]):
         raise ReplayFailure(f"{label}: event count {event_count} < {assertions['db_event_count_at_least']}")
+    if isinstance(assertions.get("db_category_counts"), dict):
+        for category, expected in assertions["db_category_counts"].items():
+            actual = category_counts.get(str(category), 0)
+            if actual != int(expected):
+                raise ReplayFailure(
+                    f"{label}: category {category!r} count {actual} != {expected}: {category_counts}"
+                )
     for expected in assertions.get("db_contains", []):
         if expected not in db_text:
             raise ReplayFailure(f"{label}: DB text did not contain {expected!r}")

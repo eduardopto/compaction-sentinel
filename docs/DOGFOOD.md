@@ -1,6 +1,6 @@
 # Dogfood Results
 
-This is an internal dogfood report for the v0.4 Reliability Contract and v0.4.1 public-proof follow-up. It is not an independent benchmark and it does not claim to control OpenAI server-side compaction. It measures whether Sentinel preserves the local continuity contract around Codex Desktop: objective, next action, evidence, loop warnings, redaction, and project resolution.
+This is an internal dogfood report for the v0.4 Reliability Contract, v0.4.1 public-proof follow-up, and v0.4.2 false-positive failure-detection hardening. It is not an independent benchmark and it does not claim to control OpenAI server-side compaction. It measures whether Sentinel preserves the local continuity contract around Codex Desktop: objective, next action, evidence, loop warnings, redaction, and project resolution.
 
 ## Real Project Surfaces
 
@@ -25,6 +25,7 @@ Checked on May 18-19, 2026 from the same Mac that runs Codex Desktop:
 | Secrets leaked | Redaction replay asserts raw GitHub, AWS, and Slack tokens are absent from packet and SQLite text | 0 raw secret leaks observed |
 | Tiny packet budgets preserve priority | Unit tests assert 500, 1000, and 2000 char packets keep objective, next action, blocker, strongest evidence, do-not-repeat warning, and resume contract | 3/3 |
 | Large noisy runs stay compact | Replay stress records 120 noisy tool results and keeps the packet under budget | 120 events |
+| False failure avoided | Replay fixture repeats doc/source reads whose contents mention failure words without producing a failure-loop warning | 1/1 |
 
 ## Real Release Run
 

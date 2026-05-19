@@ -32,7 +32,7 @@ All MCP tools require an explicit `cwd`. This avoids a subtle but serious reliab
 | `UserPromptSubmit` | Records the prompt, infers `set goal:` objectives, and injects the packet |
 | `PreToolUse` | Records intended tool use and warns on repeated command/investigation patterns |
 | `PermissionRequest` | Records approval context and repeated approval requests; never auto-approves |
-| `PostToolUse` | Records tool result summaries and warns on repeated failure/result loops |
+| `PostToolUse` | Records tool result summaries and warns on repeated real failure loops |
 | `Stop` | Records the turn end; optionally continues active work when explicitly enabled |
 
 ## Packet V2
@@ -88,6 +88,8 @@ Sentinel fingerprints prompts, tool calls, permission requests, and tool results
 - Repeated permission requests.
 
 This is a guardrail, not a security boundary. Current Codex hook interception does not cover every possible tool path.
+
+Failure detection is command-aware. Structured nonzero outcomes always count as failures. Read-only commands such as `cat`, `sed`, `rg`, `git show`, and `python -m json.tool` count as failures only when the tool output starts with a real read/shell/validation error, not merely because the file contents mention words like "failed" or "exception." Test and build commands still treat failing assertions, tracebacks, and failed-suite output as real failures.
 
 ## Fail Open
 
