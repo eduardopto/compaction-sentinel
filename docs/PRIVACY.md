@@ -27,7 +27,7 @@ Codex hook payloads may include transcript paths, but Sentinel does not parse tr
 Redaction is on by default:
 
 ```bash
-cs config set redact true
+~/.codex/bin/cs config set redact true
 ```
 
 Sentinel redacts common patterns before storing hook text:
@@ -48,7 +48,7 @@ Redaction is best effort. Do not paste secrets into Codex prompts if you can avo
 ## Export
 
 ```bash
-cs export --project --cwd "$PWD" --output sentinel-export.json
+~/.codex/bin/cs export --project --cwd "$PWD" --output sentinel-export.json
 ```
 
 This exports the current project's Sentinel ledger data as JSON for inspection or bug reports.
@@ -56,8 +56,8 @@ This exports the current project's Sentinel ledger data as JSON for inspection o
 ## Scrub
 
 ```bash
-cs scrub --project --cwd "$PWD"
-cs scrub --all
+~/.codex/bin/cs scrub --project --cwd "$PWD"
+~/.codex/bin/cs scrub --all
 ```
 
 `--project` deletes events, notes, checkpoints, and hashed project-scoped state keys for the current project root. `--all` deletes events, notes, checkpoints, and Sentinel state for every project.
@@ -67,7 +67,7 @@ New Stop-continuation state keys use a hash of the project root instead of stori
 ## Retention
 
 ```bash
-cs retention set --days 14
+~/.codex/bin/cs retention set --days 14
 ```
 
 Retention is applied during normal hook writes. Active and blocked checkpoints are preserved even when older than the retention window.

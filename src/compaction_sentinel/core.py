@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "0.4.2"
+VERSION = "0.4.3"
 APP_NAME = "Compaction Sentinel"
 DEFAULT_MAX_PACKET_CHARS = 9000
 DEFAULT_LOOP_THRESHOLD = 3
@@ -101,7 +101,7 @@ def log_path(codex_home: Path | None = None) -> Path:
 
 def default_runtime_config() -> dict[str, Any]:
     return {
-        "version": 3,
+        "version": 4,
         "max_packet_chars": DEFAULT_MAX_PACKET_CHARS,
         "loop_threshold": DEFAULT_LOOP_THRESHOLD,
         "auto_continue": "off",
@@ -111,6 +111,7 @@ def default_runtime_config() -> dict[str, Any]:
         "max_events_per_project": DEFAULT_MAX_EVENTS_PER_PROJECT,
         "retention_days": DEFAULT_RETENTION_DAYS,
         "redact": True,
+        "global_shim_bins": [],
     }
 
 

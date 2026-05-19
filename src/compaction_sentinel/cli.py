@@ -58,6 +58,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop-hook continuation policy. Defaults to preserving the current setting, or off on first install.",
     )
     install.add_argument("--skills-target", choices=["codex", "agents", "both"], default="both", help="Where to copy the skill.")
+    install.add_argument(
+        "--global-bin",
+        type=Path,
+        default=None,
+        help="Opt in to global cs/compaction-sentinel shims in this bin directory, such as /opt/homebrew/bin.",
+    )
     install.add_argument("--dry-run", action="store_true", help="Show what would change without writing files.")
     install.add_argument("--doctor", action="store_true", help="Run doctor after installation.")
 
@@ -66,6 +72,12 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="Print install and runtime status.")
     doctor.add_argument("--fix", action="store_true", help="Repair missing hooks, MCP config, hook feature, and CLI links.")
+    doctor.add_argument(
+        "--global-bin",
+        type=Path,
+        default=None,
+        help="With --fix, opt in to global cs/compaction-sentinel shims in this bin directory.",
+    )
     doctor.add_argument("--explain", action="store_true", help="Include human-readable issue explanations.")
 
     hook = sub.add_parser("hook", help="Run a Codex hook handler. Used by hooks.json.")
@@ -201,6 +213,7 @@ def main(argv: list[str] | None = None) -> int:
             enable_stop_continue=args.enable_stop_continue,
             auto_continue=args.auto_continue,
             skills_target=args.skills_target,
+            global_bin=args.global_bin,
             dry_run=args.dry_run,
         )
         if args.doctor and not args.dry_run:
@@ -215,7 +228,7 @@ def main(argv: list[str] | None = None) -> int:
 
     if args.command == "doctor":
         if args.fix:
-            result = installer.doctor_fix(codex_home=codex_home)
+            result = installer.doctor_fix(codex_home=codex_home, global_bin=args.global_bin)
         else:
             result = installer.doctor(codex_home=codex_home)
         if args.explain:

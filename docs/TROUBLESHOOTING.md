@@ -23,6 +23,8 @@ If `~/.codex/bin/cs` is not available, use:
 ~/.codex/compaction-sentinel/bin/cs doctor --explain
 ```
 
+Do not diagnose Sentinel as missing just because plain `cs` is absent from PATH. Hooks and MCP use absolute paths. The guaranteed CLI path is `~/.codex/bin/cs`.
+
 ## Repair Install Drift
 
 ```bash
@@ -30,6 +32,12 @@ If `~/.codex/bin/cs` is not available, use:
 ```
 
 This rewrites Sentinel hook entries, the MCP block, the hooks feature flag, and Sentinel-owned CLI links.
+
+If `doctor` says plain `cs` is not discoverable, either keep using the guaranteed path, add `~/.codex/bin` to your shell PATH, or opt in to global shims:
+
+```bash
+~/.codex/bin/cs doctor --fix --global-bin /opt/homebrew/bin --explain
+```
 
 ## Codex Does Not Seem To Remember Anything
 
@@ -57,6 +65,22 @@ The installer avoids overwriting a non-Sentinel `~/.codex/bin/cs`. Use the full 
 ```
 
 `doctor` will warn if `~/.codex/bin/cs` exists but is not owned by Sentinel.
+
+## Plain `cs` Is Missing From PATH
+
+This is not a hook or MCP failure. Use:
+
+```bash
+~/.codex/bin/cs status --cwd "$PWD"
+```
+
+To make plain `cs` work globally without editing shell startup files, opt in:
+
+```bash
+~/.codex/bin/cs doctor --fix --global-bin /opt/homebrew/bin --explain
+```
+
+Sentinel records that global shim directory so `~/.codex/bin/cs uninstall` can remove the Sentinel-owned global links later.
 
 ## `codex mcp list` Does Not Show `compaction_sentinel`
 

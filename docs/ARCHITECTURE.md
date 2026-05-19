@@ -78,6 +78,6 @@ The CLI is both user-facing and hook-facing. User commands manage checkpoints, e
 
 - If hooks are disabled or not trusted, only the skill/plugin layer remains.
 - If Codex changes hook schemas, Sentinel falls back to best-effort extraction.
-- If the agent ignores injected context, the user may still need to ask it to use the skill or inspect `cs packet --cwd "$PWD"`.
+- If the agent ignores injected context, the user may still need to ask it to use the skill or inspect `~/.codex/bin/cs packet --cwd "$PWD"`.
 - If a task has no checkpoint and no useful hook history, the packet can only preserve recent events.
 - Hook coverage is not complete for every possible tool path, so warnings are a continuity guardrail rather than complete enforcement.

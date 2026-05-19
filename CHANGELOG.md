@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.4.3
+
+- Updates the installed skill to use the guaranteed `~/.codex/bin/cs` path instead of plain `cs`, so agents do not conclude Sentinel is missing when a shell PATH omits `~/.codex/bin`.
+- Adds PATH-aware doctor diagnostics: `doctor` now reports where plain `cs` resolves, whether it is Sentinel-owned, and warns when `cs` is missing or shadowed.
+- Extends `doctor --fix --explain` with safe PATH guidance instead of reporting a perfect install when only the optional shell shortcut is missing.
+- Pins generated CLI launchers to the Python used during install so `~/.codex/bin/cs` does not accidentally run an older system Python from PATH.
+- Adds opt-in global shims with `--global-bin /opt/homebrew/bin`; Sentinel records those bins and `uninstall` removes only officially recorded Sentinel-owned global shims.
+- Adds installer tests for PATH warnings, non-Sentinel `cs` shadowing, global shim install/repair/uninstall, and skill CLI fallback wording.
+
 ## 0.4.2
 
 - Makes PostToolUse failure detection command-aware so read-only `cat`, `sed`, `rg`, `git show`, `json.tool`, and similar commands are not marked failed merely because file contents mention "failed", "exception", or traceback examples.

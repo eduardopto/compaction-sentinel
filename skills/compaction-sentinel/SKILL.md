@@ -51,15 +51,17 @@ Always include `cwd` in MCP calls. Example:
 If MCP tools are unavailable but the runtime is installed, use:
 
 ```bash
-cs checkpoint --cwd "$PWD" --objective "..." --current-step "..." --next-action "..." --evidence "..."
-cs checkpoint --cwd "$PWD" --same-objective --current-step "..." --next-action "..." --tests-passed "..."
-cs evidence add --cwd "$PWD" "make test passed"
-cs avoid add --cwd "$PWD" "Do not rerun npm install; dependency issue was already ruled out"
-cs note --cwd "$PWD" "..." --when "..."
-cs packet --cwd "$PWD"
-cs status --cwd "$PWD"
-cs doctor
+~/.codex/bin/cs checkpoint --cwd "$PWD" --objective "..." --current-step "..." --next-action "..." --evidence "..."
+~/.codex/bin/cs checkpoint --cwd "$PWD" --same-objective --current-step "..." --next-action "..." --tests-passed "..."
+~/.codex/bin/cs evidence add --cwd "$PWD" "make test passed"
+~/.codex/bin/cs avoid add --cwd "$PWD" "Do not rerun npm install; dependency issue was already ruled out"
+~/.codex/bin/cs note --cwd "$PWD" "..." --when "..."
+~/.codex/bin/cs packet --cwd "$PWD"
+~/.codex/bin/cs status --cwd "$PWD"
+~/.codex/bin/cs doctor
 ```
+
+Do not conclude Sentinel is missing just because plain `cs` is absent from PATH. The guaranteed CLI path is `~/.codex/bin/cs`; plain `cs` is only available when the user has added that directory to PATH or opted into a global shim.
 
 ## Checkpoint Quality
 

@@ -15,10 +15,10 @@ Codex hooks are useful for observability and guardrails, but they do not interce
 Redaction is enabled by default and covers common key/token formats. It is still best effort. If sensitive data may have been stored:
 
 ```bash
-cs export --project --cwd "$PWD" --output sentinel-export.json
-cs scrub --project --cwd "$PWD"
+~/.codex/bin/cs export --project --cwd "$PWD" --output sentinel-export.json
+~/.codex/bin/cs scrub --project --cwd "$PWD"
 ```
 
 ## Reporting Issues
 
-For security issues, avoid posting secrets in public GitHub issues. Share a minimal reproduction with redacted `cs export --project --cwd "$PWD"` output when possible.
+For security issues, avoid posting secrets in public GitHub issues. Share a minimal reproduction with redacted `~/.codex/bin/cs export --project --cwd "$PWD"` output when possible.

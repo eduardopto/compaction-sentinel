@@ -90,6 +90,7 @@ def install(
     enable_stop_continue: bool = False,
     auto_continue: str | None = None,
     skills_target: str = "both",
+    global_bin: Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
     ensure_supported_environment()
@@ -97,6 +98,9 @@ def install(
     ensure_source_assets(source_root)
     actions: list[str] = []
     actual_auto_continue = auto_continue or ("gentle" if enable_stop_continue else None)
+    if global_bin is not None:
+        global_bin = normalize_bin_dir(global_bin)
+        validate_global_bin_available(global_bin)
     if not dry_run:
         install_package(source_root, codex_home)
         install_skill(source_root, codex_home, skills_target)
@@ -104,6 +108,9 @@ def install(
         merge_mcp_config(codex_home)
         ensure_hooks_feature(codex_home)
         config = load_runtime_config(codex_home)
+        if global_bin is not None:
+            install_global_links(global_bin, launcher_path(codex_home))
+            remember_global_bin(config, global_bin)
         if actual_auto_continue is not None:
             config["auto_continue"] = actual_auto_continue
         actual_auto_continue = str(config.get("auto_continue") or "off")
@@ -119,6 +126,8 @@ def install(
             f"auto_continue -> {actual_auto_continue}",
         ]
     )
+    if global_bin is not None:
+        actions.append(f"global_bin -> {normalize_bin_dir(global_bin)}")
     return {"version": VERSION, "platform": platform.system(), "dry_run": dry_run, "actions": actions}
 
 
@@ -146,7 +155,7 @@ def install_package(source_root: Path, codex_home: Path) -> None:
     bin_dir.mkdir(parents=True, exist_ok=True)
     launcher = bin_dir / "compaction-sentinel"
     launcher.write_text(
-        "#!/usr/bin/env python3\n"
+        f"#!{sys.executable}\n"
         "import runpy\n"
         "import sys\n"
         f"sys.path.insert(0, {str(root / 'runtime')!r})\n"
@@ -166,6 +175,10 @@ def install_package(source_root: Path, codex_home: Path) -> None:
         install_public_link(public_link, launcher)
 
 
+def launcher_path(codex_home: Path) -> Path:
+    return install_root(codex_home) / "bin" / "compaction-sentinel"
+
+
 def install_public_link(link: Path, target: Path) -> None:
     if link.is_symlink():
         try:
@@ -179,6 +192,62 @@ def install_public_link(link: Path, target: Path) -> None:
     if link.exists():
         return
     link.symlink_to(target)
+
+
+def normalize_bin_dir(path: Path) -> Path:
+    expanded = path.expanduser()
+    return expanded if expanded.is_absolute() else expanded.resolve(strict=False)
+
+
+def install_global_links(bin_dir: Path, launcher: Path) -> list[Path]:
+    bin_dir = normalize_bin_dir(bin_dir)
+    bin_dir.mkdir(parents=True, exist_ok=True)
+    links = [bin_dir / "compaction-sentinel", bin_dir / "cs"]
+    for link in links:
+        install_public_link(link, launcher)
+    blocked = [str(link) for link in links if not public_link_points_to_sentinel(link)]
+    if blocked:
+        raise RuntimeError(
+            "global shim path exists but is not owned by Compaction Sentinel: "
+            + ", ".join(blocked)
+        )
+    return links
+
+
+def validate_global_bin_available(bin_dir: Path) -> None:
+    for name in ("compaction-sentinel", "cs"):
+        link = normalize_bin_dir(bin_dir) / name
+        if (link.exists() or link.is_symlink()) and not public_link_points_to_sentinel(link):
+            raise RuntimeError(f"global shim path exists but is not owned by Compaction Sentinel: {link}")
+
+
+def configured_global_bins(config: dict[str, Any]) -> list[Path]:
+    raw = config.get("global_shim_bins")
+    if not isinstance(raw, list):
+        return []
+    bins: list[Path] = []
+    seen: set[str] = set()
+    for item in raw:
+        if not isinstance(item, str) or not item.strip():
+            continue
+        path = normalize_bin_dir(Path(item))
+        key = str(path)
+        if key not in seen:
+            seen.add(key)
+            bins.append(path)
+    return bins
+
+
+def remember_global_bin(config: dict[str, Any], bin_dir: Path) -> None:
+    bins = {str(path) for path in configured_global_bins(config)}
+    bins.add(str(normalize_bin_dir(bin_dir)))
+    config["global_shim_bins"] = sorted(bins)
+
+
+def sentinel_path_owned(path: str | None) -> bool:
+    if not path:
+        return False
+    return public_link_points_to_sentinel(Path(path))
 
 
 def install_skill(source_root: Path, codex_home: Path, target: str) -> None:
@@ -371,6 +440,7 @@ def remove_toml_table(text: str, table: str) -> str:
 def uninstall(*, codex_home: Path, purge: bool = False) -> dict[str, Any]:
     hooks_path = codex_home / "hooks.json"
     removed: list[str] = []
+    runtime_config = load_runtime_config(codex_home)
     if hooks_path.exists():
         backup_file(hooks_path)
         try:
@@ -400,6 +470,14 @@ def uninstall(*, codex_home: Path, purge: bool = False) -> dict[str, Any]:
         if public_link_points_to_sentinel(link):
             link.unlink()
             removed.append(f"cli:{link.name}")
+    for bin_dir in configured_global_bins(runtime_config):
+        for link in (bin_dir / "compaction-sentinel", bin_dir / "cs"):
+            if public_link_points_to_sentinel(link):
+                link.unlink()
+                removed.append(f"global-cli:{link}")
+    if configured_global_bins(runtime_config) and not purge and install_root(codex_home).exists():
+        runtime_config["global_shim_bins"] = []
+        write_runtime_config(runtime_config, codex_home)
     if purge and install_root(codex_home).exists():
         shutil.rmtree(install_root(codex_home))
         removed.append("runtime-and-ledger")
@@ -444,6 +522,15 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
     hooks_feature_present = features.get("hooks") is True
     public_cli = codex_home / "bin" / "cs"
     public_cli_owned = public_link_points_to_sentinel(public_cli)
+    path_cli = shutil.which("cs")
+    path_cli_owned = sentinel_path_owned(path_cli)
+    config = load_runtime_config(codex_home)
+    global_bins = configured_global_bins(config)
+    global_cli_links = {
+        str(bin_dir / name): public_link_points_to_sentinel(bin_dir / name)
+        for bin_dir in global_bins
+        for name in ("compaction-sentinel", "cs")
+    }
     if platform.system() != SUPPORTED_MACOS:
         issues.append("host is not macOS")
     if sys.version_info < MIN_PYTHON:
@@ -456,9 +543,17 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
         issues.append("compaction_sentinel MCP config is missing")
     if not hooks_feature_present:
         issues.append("Codex hooks feature is not enabled in config.toml")
+    if not public_cli.exists():
+        warnings.append("~/.codex/bin/cs is missing; run `~/.codex/compaction-sentinel/bin/cs doctor --fix`")
     if public_cli.exists() and not public_cli_owned:
         warnings.append("~/.codex/bin/cs exists but is not owned by Compaction Sentinel; use ~/.codex/compaction-sentinel/bin/cs")
-    config = load_runtime_config(codex_home)
+    if public_cli_owned and not path_cli:
+        warnings.append("plain `cs` is not discoverable on PATH; use ~/.codex/bin/cs or add ~/.codex/bin to PATH")
+    if path_cli and not path_cli_owned:
+        warnings.append(f"plain `cs` resolves to non-Sentinel command {path_cli}; use ~/.codex/bin/cs")
+    missing_global_links = [path for path, owned in global_cli_links.items() if not owned]
+    if missing_global_links:
+        warnings.append("recorded global Sentinel shim is missing or not owned: " + ", ".join(missing_global_links))
     return {
         "version": VERSION,
         "ok": not issues,
@@ -474,6 +569,10 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
         "public_cli": str(public_cli),
         "public_cli_exists": public_cli.exists(),
         "public_cli_owned": public_cli_owned,
+        "path_cli": path_cli,
+        "path_cli_owned": path_cli_owned,
+        "global_shim_bins": [str(path) for path in global_bins],
+        "global_cli_links": global_cli_links,
         "hooks_json": str(hooks_path),
         "hooks_by_event": hooks_by_event,
         "hooks_present": all(hooks_by_event.values()),
@@ -486,7 +585,7 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
     }
 
 
-def doctor_fix(*, codex_home: Path) -> dict[str, Any]:
+def doctor_fix(*, codex_home: Path, global_bin: Path | None = None) -> dict[str, Any]:
     actions: list[str] = []
     root = install_root(codex_home)
     if not root.exists():
@@ -503,6 +602,15 @@ def doctor_fix(*, codex_home: Path) -> dict[str, Any]:
     install_public_link(public_bin / "compaction-sentinel", launcher)
     install_public_link(public_bin / "cs", launcher)
     actions.append("checked CLI links")
+    config = load_runtime_config(codex_home)
+    if global_bin is not None:
+        remember_global_bin(config, normalize_bin_dir(global_bin))
+    global_bins = configured_global_bins(config)
+    for bin_dir in global_bins:
+        install_global_links(bin_dir, launcher)
+        actions.append(f"checked global CLI links in {bin_dir}")
+    if global_bin is not None or global_bins:
+        write_runtime_config(config, codex_home)
     result = doctor(codex_home=codex_home)
     result["fix_actions"] = actions
     return result
@@ -513,13 +621,30 @@ def doctor_explanations(result: dict[str, Any]) -> list[str]:
     for issue in result.get("issues", []):
         text = str(issue)
         if "hooks.json" in text:
-            explanations.append("Hooks load the automatic resume packet; rerun install or `cs doctor --fix`.")
+            explanations.append("Hooks load the automatic resume packet; rerun install or `~/.codex/bin/cs doctor --fix`.")
         elif "MCP" in text or "mcp" in text:
-            explanations.append("MCP tools let Codex explicitly save/search checkpoints; `cs doctor --fix` rewrites the config block.")
+            explanations.append("MCP tools let Codex explicitly save/search checkpoints; `~/.codex/bin/cs doctor --fix` rewrites the config block.")
         elif "runtime" in text:
             explanations.append("The runtime contains the hook scripts and local ledger code; reinstall from the package.")
         elif "hooks feature" in text:
             explanations.append("Codex must have `[features] hooks = true` for user-level hooks to run.")
+        else:
+            explanations.append(text)
+    if not result.get("issues"):
+        explanations.append("No blocking install issues detected.")
+    for warning in result.get("warnings", []):
+        text = str(warning)
+        if "plain `cs` is not discoverable" in text:
+            explanations.append(
+                "Plain `cs` is optional. Use `~/.codex/bin/cs`, add `~/.codex/bin` to PATH, "
+                "or opt in to global shims with `~/.codex/bin/cs doctor --fix --global-bin /opt/homebrew/bin`."
+            )
+        elif "plain `cs` resolves to non-Sentinel" in text:
+            explanations.append("Another command named `cs` is earlier on PATH. Use `~/.codex/bin/cs` to avoid ambiguity.")
+        elif "~/.codex/bin/cs is missing" in text:
+            explanations.append("The guaranteed user-level CLI shim is missing; `doctor --fix` recreates it.")
+        elif "recorded global Sentinel shim" in text:
+            explanations.append("A previously opted-in global shim drifted; rerun `doctor --fix` to repair it or `uninstall` to remove it.")
         else:
             explanations.append(text)
     if not explanations:

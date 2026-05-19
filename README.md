@@ -31,7 +31,7 @@ With Sentinel:
 Example packet excerpt:
 
 ```xml
-<compaction-sentinel version="0.4.2" schema="packet-v2" reason="session-start">
+<compaction-sentinel version="0.4.3" schema="packet-v2" reason="session-start">
   <active_objective>
   status: active
   objective: Finish auth repair and device verification
@@ -148,6 +148,14 @@ Repair or roll back install files:
 ~/.codex/bin/cs backup list
 ~/.codex/bin/cs backup restore hooks.json.20260518-120000.bak
 ```
+
+Plain `cs` is optional. The guaranteed CLI path is `~/.codex/bin/cs`; if a shell cannot find plain `cs`, Sentinel is not missing. You can add `~/.codex/bin` to PATH or opt in to global shims:
+
+```bash
+~/.codex/bin/cs doctor --fix --global-bin /opt/homebrew/bin --explain
+```
+
+Sentinel records opt-in global shim directories and removes only recorded Sentinel-owned global shims during uninstall.
 
 Uninstall:
 

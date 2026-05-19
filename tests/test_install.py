@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import json
+import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
-from compaction_sentinel.install import doctor, install, remove_toml_table
+from compaction_sentinel.install import doctor, doctor_explanations, doctor_fix, install, remove_toml_table, uninstall
 
 
 class InstallTests(unittest.TestCase):
@@ -45,6 +47,8 @@ class InstallTests(unittest.TestCase):
             self.assertTrue(status["hooks_present"])
             self.assertTrue(status["hooks_by_event"]["PermissionRequest"])
             self.assertEqual(status["auto_continue"], "off")
+            launcher = (home / "compaction-sentinel" / "bin" / "compaction-sentinel").read_text(encoding="utf-8")
+            self.assertTrue(launcher.startswith(f"#!{sys.executable}\n"))
 
     def test_remove_toml_table(self) -> None:
         text = "[features]\nhooks = true\n[mcp_servers.compaction_sentinel]\ncommand = \"x\"\n[other]\na = 1\n"
@@ -65,6 +69,81 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(existing.read_text(encoding="utf-8"), "#!/bin/sh\necho existing\n")
             self.assertTrue((public_bin / "compaction-sentinel").is_symlink())
             self.assertFalse(doctor(codex_home=home)["public_cli_owned"])
+
+    def test_doctor_warns_when_plain_cs_is_not_on_path(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            install(source_root=source_root, codex_home=home, skills_target="codex")
+            with patch.dict("os.environ", {"PATH": ""}):
+                status = doctor(codex_home=home)
+            self.assertTrue(status["ok"])
+            self.assertIsNone(status["path_cli"])
+            self.assertTrue(status["public_cli_owned"])
+            self.assertTrue(any("plain `cs` is not discoverable" in item for item in status["warnings"]))
+            explanations = doctor_explanations(status)
+            self.assertTrue(any("--global-bin /opt/homebrew/bin" in item for item in explanations))
+
+    def test_doctor_warns_when_plain_cs_points_elsewhere(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            other_bin = Path(tmp) / "other-bin"
+            other_bin.mkdir()
+            other_cs = other_bin / "cs"
+            other_cs.write_text("#!/bin/sh\necho not-sentinel\n", encoding="utf-8")
+            other_cs.chmod(0o755)
+            install(source_root=source_root, codex_home=home, skills_target="codex")
+            with patch.dict("os.environ", {"PATH": str(other_bin)}):
+                status = doctor(codex_home=home)
+            self.assertEqual(status["path_cli"], str(other_cs))
+            self.assertFalse(status["path_cli_owned"])
+            self.assertTrue(any("plain `cs` resolves to non-Sentinel" in item for item in status["warnings"]))
+
+    def test_global_bin_is_opt_in_recorded_and_uninstalled(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            global_bin = Path(tmp) / "global-bin"
+            install(source_root=source_root, codex_home=home, skills_target="codex", global_bin=global_bin)
+            self.assertTrue((global_bin / "cs").is_symlink())
+            self.assertTrue((global_bin / "compaction-sentinel").is_symlink())
+            with patch.dict("os.environ", {"PATH": str(global_bin)}):
+                status = doctor(codex_home=home)
+            self.assertEqual(status["path_cli"], str(global_bin / "cs"))
+            self.assertTrue(status["path_cli_owned"])
+            self.assertIn(str(global_bin), status["global_shim_bins"])
+            self.assertFalse(any("plain `cs` is not discoverable" in item for item in status["warnings"]))
+            result = uninstall(codex_home=home, purge=True)
+            self.assertTrue(any(item.startswith("global-cli:") for item in result["removed"]))
+            self.assertFalse((global_bin / "cs").exists())
+            self.assertFalse((global_bin / "compaction-sentinel").exists())
+
+    def test_global_bin_conflict_fails_clearly(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            global_bin = Path(tmp) / "global-bin"
+            global_bin.mkdir()
+            conflict = global_bin / "cs"
+            conflict.write_text("#!/bin/sh\necho other\n", encoding="utf-8")
+            conflict.chmod(0o755)
+            with self.assertRaisesRegex(RuntimeError, "global shim path exists"):
+                install(source_root=source_root, codex_home=home, skills_target="codex", global_bin=global_bin)
+            self.assertFalse((home / "compaction-sentinel").exists())
+
+    def test_doctor_fix_repairs_recorded_global_bin(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            global_bin = Path(tmp) / "global-bin"
+            install(source_root=source_root, codex_home=home, skills_target="codex", global_bin=global_bin)
+            (global_bin / "cs").unlink()
+            status = doctor(codex_home=home)
+            self.assertTrue(any("recorded global Sentinel shim" in item for item in status["warnings"]))
+            fixed = doctor_fix(codex_home=home)
+            self.assertTrue((global_bin / "cs").is_symlink())
+            self.assertIn(f"checked global CLI links in {global_bin}", fixed["fix_actions"])
 
     def test_enable_stop_continue_sets_gentle_policy(self) -> None:
         source_root = Path(__file__).resolve().parents[1]
@@ -146,6 +225,16 @@ class InstallTests(unittest.TestCase):
             result = uninstall(codex_home=home, purge=True)
             self.assertIn("runtime-and-ledger", result["removed"])
             self.assertFalse((home / "compaction-sentinel").exists())
+
+    def test_skill_cli_fallback_uses_guaranteed_codex_bin_path(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for skill in (
+            root / "skills" / "compaction-sentinel" / "SKILL.md",
+            root / "src" / "compaction_sentinel" / "assets" / "skills" / "compaction-sentinel" / "SKILL.md",
+        ):
+            text = skill.read_text(encoding="utf-8")
+            self.assertIn("~/.codex/bin/cs checkpoint", text)
+            self.assertNotIn("\ncs checkpoint", text)
 
 
 if __name__ == "__main__":

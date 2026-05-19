@@ -37,9 +37,9 @@ Compaction Sentinel is a local developer productivity tool. Its main risk is not
 - User-level hooks are explicit install artifacts.
 - Plugin hooks are documented as opt-in, not assumed automatic.
 - Permission requests are recorded but not decided.
-- `cs scrub` and `cs export` give users data control.
-- `cs doctor --fix` repairs known config drift without wiping the ledger.
-- `cs backup restore` rolls back installer config changes.
+- `~/.codex/bin/cs scrub` and `~/.codex/bin/cs export` give users data control.
+- `~/.codex/bin/cs doctor --fix` repairs known config drift without wiping the ledger.
+- `~/.codex/bin/cs backup restore` rolls back installer config changes.
 
 ## Residual Risks
 

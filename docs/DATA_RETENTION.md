@@ -11,13 +11,13 @@ Sentinel keeps continuity data local under:
 The default retention window is 30 days.
 
 ```bash
-cs config show
+~/.codex/bin/cs config show
 ```
 
 ## Change Retention
 
 ```bash
-cs retention set --days 14
+~/.codex/bin/cs retention set --days 14
 ```
 
 Set `0` to disable automatic age-based pruning.
@@ -35,8 +35,8 @@ Active and blocked checkpoints are kept because they may be needed to resume liv
 ## Manual Deletion
 
 ```bash
-cs scrub --project --cwd "$PWD"
-cs scrub --all
+~/.codex/bin/cs scrub --project --cwd "$PWD"
+~/.codex/bin/cs scrub --all
 ```
 
 Use `--project` before sharing a repo-specific bug report. Use `--all` before uninstalling with `--purge` if you want an explicit ledger wipe first.

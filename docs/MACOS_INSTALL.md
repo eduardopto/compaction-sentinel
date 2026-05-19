@@ -40,6 +40,8 @@ Package installs include the skill assets, so they do not require a source check
 - `~/.agents/skills/compaction-sentinel` skill copy.
 - `~/.codex/bin/cs` and `~/.codex/bin/compaction-sentinel` shims when those names are available.
 
+The guaranteed CLI path is `~/.codex/bin/cs`. Plain `cs` only works if your shell PATH includes `~/.codex/bin` or if you opt in to a global shim.
+
 Before changing `~/.codex/hooks.json` or `~/.codex/config.toml`, the installer writes backups under:
 
 ```bash
@@ -66,6 +68,22 @@ You should see `compaction_sentinel` in the MCP list and `doctor` should return 
 ```
 
 This repairs missing hook entries, the MCP block, the hooks feature flag, and Sentinel-owned CLI links. It does not erase your ledger.
+
+## Optional Global CLI Shims
+
+Sentinel does not silently write into global shell directories. If you want plain `cs` to work in shells that already include `/opt/homebrew/bin`, opt in explicitly:
+
+```bash
+~/.codex/bin/cs doctor --fix --global-bin /opt/homebrew/bin --explain
+```
+
+or during install:
+
+```bash
+python3 scripts/install.py --doctor --global-bin /opt/homebrew/bin
+```
+
+`doctor` records opt-in global shim directories in Sentinel config. `uninstall` removes only recorded Sentinel-owned global shims; it will not remove unrelated commands.
 
 ## Backups
 

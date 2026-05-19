@@ -24,6 +24,8 @@ All MCP tools require an explicit `cwd`. This avoids a subtle but serious reliab
 - CLI: `~/.codex/bin/cs` or `~/.codex/compaction-sentinel/bin/cs`
 - Skill copy: `~/.codex/skills/compaction-sentinel`
 
+Plain `cs` is a shell convenience, not the install contract. The guaranteed command is `~/.codex/bin/cs`; optional global shims are explicit and recorded so uninstall can remove them safely.
+
 ## Hook Events
 
 | Event | What Sentinel Does |

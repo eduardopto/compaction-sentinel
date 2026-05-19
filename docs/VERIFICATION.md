@@ -77,6 +77,17 @@ python3 scripts/install.py --codex-home /tmp/compaction-sentinel-install --skill
 
 Expected: `"ok": true`, runtime exists, hooks are present for all events, MCP config is present, and the internal CLI exists.
 
+## PATH And Global Shim Smoke
+
+```bash
+PATH="/usr/bin:/bin" /tmp/compaction-sentinel-install/bin/cs --codex-home /tmp/compaction-sentinel-install doctor --explain
+/tmp/compaction-sentinel-install/bin/cs --codex-home /tmp/compaction-sentinel-install doctor --fix --global-bin /tmp/compaction-sentinel-global --explain
+PATH="/tmp/compaction-sentinel-global" cs --codex-home /tmp/compaction-sentinel-install doctor
+/tmp/compaction-sentinel-install/bin/cs --codex-home /tmp/compaction-sentinel-install uninstall --purge
+```
+
+Expected: missing plain `cs` is a warning, not a failed install; the opt-in global shim works; uninstall removes recorded Sentinel-owned global links.
+
 ## Real Codex Install Smoke
 
 ```bash
