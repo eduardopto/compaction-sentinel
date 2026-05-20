@@ -38,6 +38,8 @@ python3 scripts/replay_hooks.py tests/fixtures/scenarios/stale_restart_after_com
 
 The harness asserts objective preservation, next action preservation, loop warnings, redaction, DB contents, event category counts, state-key cleanup, packet budget, project isolation, MCP `cwd` enforcement, false-completion handling, false-positive doc/source read handling, and Stop continuation caps.
 
+Unit tests also assert the installed skill is CLI-first for normal Full Access state writes and does not regress to MCP-first guidance that can trigger extra app approval prompts.
+
 ## Hook Smoke
 
 ```bash

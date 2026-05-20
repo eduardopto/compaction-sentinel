@@ -14,21 +14,37 @@ When Compaction Sentinel is installed, hooks should already inject a resume pack
 1. Treat the latest Compaction Sentinel packet, current files, and explicit user acceptance criteria as the resume authority.
 2. Continue the active objective. Do not restart from only the last user message after compaction.
 3. Before repeating a command, proof pass, investigation route, or fix, inspect the latest concrete artifact or log and choose one changed hypothesis.
-4. Write a checkpoint whenever the current step, next action, blocker, acceptance criteria, or verified evidence changes.
+4. Write a checkpoint whenever the current step, next action, blocker, acceptance criteria, or verified evidence changes. Prefer the local CLI path (`~/.codex/bin/cs ... --cwd ...`) for normal Codex Desktop work.
 5. Keep checkpoints factual and compact: objective, acceptance criteria, current step, next action, blockers, evidence, files touched, commands run, tests passed/failed, decisions, assumptions, and do-not-repeat items when relevant.
 6. If the packet and repository disagree, verify the repository and update the checkpoint.
 7. Do not treat a loop warning as proof of failure; inspect the latest concrete output and then choose a different hypothesis.
-8. Always pass the active project `cwd` when calling any Compaction Sentinel MCP tool.
-9. After tests, builds, installs, or other meaningful milestone results, call `compaction_evidence_add` with the exact `cwd` and a compact evidence note.
-10. After a repeated failed route or ruled-out hypothesis, call `compaction_avoid_add` with the exact `cwd`.
+8. Always pass the active project `cwd` to Sentinel: use `--cwd` for CLI calls and `cwd` for MCP calls.
+9. After tests, builds, installs, or other meaningful milestone results, record evidence with `~/.codex/bin/cs evidence add --cwd ...`. Use `compaction_evidence_add` only when the CLI is unavailable or the user explicitly asks for MCP.
+10. After a repeated failed route or ruled-out hypothesis, record it with `~/.codex/bin/cs avoid add --cwd ...`. Use `compaction_avoid_add` only when the CLI is unavailable or the user explicitly asks for MCP.
 11. Before claiming completion, verify the user's acceptance criteria and the latest tool output. Do not claim completion from a checkpoint alone.
-12. When this skill is invoked for a long-running task and no active checkpoint exists, immediately call `compaction_checkpoint` with `cwd`, objective, acceptance criteria if available, current step, next action, and confidence before doing extended work.
+12. When this skill is invoked for a long-running task and no active checkpoint exists, immediately run `~/.codex/bin/cs checkpoint --cwd ...` with objective, acceptance criteria if available, current step, next action, and confidence before doing extended work. Use `compaction_checkpoint` only when the CLI is unavailable or the user explicitly asks for MCP.
 13. Do not call evidence tools after routine file reads, searches, or tiny inspection commands. Batch evidence at milestones.
 14. Prefer one checkpoint per meaningful state transition, not one checkpoint after every tool call.
 
+## Seamless Default
+
+For normal Codex Desktop work, prefer the local CLI:
+
+```bash
+~/.codex/bin/cs checkpoint --cwd "$PWD" --objective "..." --current-step "..." --next-action "..." --confidence high
+~/.codex/bin/cs evidence add --cwd "$PWD" "make test passed"
+~/.codex/bin/cs avoid add --cwd "$PWD" "Do not rerun npm install; dependency issue was already ruled out"
+~/.codex/bin/cs packet --cwd "$PWD"
+~/.codex/bin/cs status --cwd "$PWD"
+```
+
+Reason: Codex Full Access covers shell/filesystem access, while MCP/plugin tools may still trigger separate app approval prompts. The CLI writes the same local Sentinel ledger and is the default path for seamless unattended work.
+
+Do not request extra permissions just to write Sentinel checkpoints, evidence, avoid-list items, packets, or status when `~/.codex/bin/cs` is available.
+
 ## MCP Tools
 
-When available, prefer the `compaction_sentinel` MCP tools:
+The `compaction_sentinel` MCP tools remain available for environments where the CLI is unavailable, shell access is not usable, or the user explicitly asks for MCP:
 
 - `compaction_checkpoint`: save a durable checkpoint.
 - `compaction_evidence_add`: append command/test/build/install evidence to the active checkpoint.
@@ -49,9 +65,9 @@ Always include `cwd` in MCP calls. Example:
 }
 ```
 
-## CLI Fallback
+## CLI Path
 
-If MCP tools are unavailable but the runtime is installed, use:
+Use the guaranteed CLI path for normal state writes:
 
 ```bash
 ~/.codex/bin/cs checkpoint --cwd "$PWD" --objective "..." --current-step "..." --next-action "..." --evidence "..."

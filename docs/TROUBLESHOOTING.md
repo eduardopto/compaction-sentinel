@@ -49,6 +49,22 @@ If `doctor` says plain `cs` is not discoverable, either keep using the guarantee
 4. Run `codex mcp list` and confirm `compaction_sentinel` appears.
 5. In the project folder, run `~/.codex/bin/cs packet --cwd "$PWD"` and confirm a packet prints.
 
+## Codex Keeps Asking Permission For Sentinel Calls
+
+This is usually the MCP/plugin approval path, not the goal system and not the local ledger. Codex Full Access covers shell/filesystem operations, but MCP/plugin tools can still trigger a separate app approval prompt.
+
+For seamless Full Access runs, tell the agent to use the local CLI for Sentinel state writes:
+
+```bash
+~/.codex/bin/cs checkpoint --cwd "$PWD" --objective "..." --current-step "..." --next-action "..."
+~/.codex/bin/cs evidence add --cwd "$PWD" "make test passed"
+~/.codex/bin/cs avoid add --cwd "$PWD" "Do not repeat the failed route"
+```
+
+The installed skill now prefers this CLI path by default. If an old running Codex thread keeps choosing MCP, restart that thread after updating the skill or explicitly tell it: "Use `~/.codex/bin/cs`, not Sentinel MCP, for checkpoint/evidence/status writes."
+
+Do not ask Codex to auto-approve Sentinel MCP permission prompts. Sentinel records `PermissionRequest` context but does not approve or deny app-level permissions.
+
 ## The Skill Does Not Appear
 
 The skill is not the primary automatic layer. Hooks are. Still, the installer copies the skill to:

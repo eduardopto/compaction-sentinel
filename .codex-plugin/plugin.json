@@ -1,6 +1,6 @@
 {
   "name": "compaction-sentinel",
-  "version": "0.4.5",
+  "version": "0.4.6",
   "description": "Codex Desktop continuity hooks, skill, and MCP tools that preserve active work across compaction.",
   "author": {
     "name": "Eduardo Castillo"
@@ -15,7 +15,7 @@
   "interface": {
     "displayName": "Compaction Sentinel",
     "shortDescription": "Keep long Codex Desktop work from losing the live thread after compaction.",
-    "longDescription": "Adds a compact skill, durable local checkpoints, PermissionRequest-aware hook packets, regression loop detection, privacy controls, and MCP tools for long Codex Desktop sessions.",
+    "longDescription": "Adds a compact CLI-first skill, durable local checkpoints, PermissionRequest-aware hook packets, regression loop detection, privacy controls, and MCP tools for long Codex Desktop sessions.",
     "developerName": "Eduardo Castillo",
     "category": "Productivity",
     "capabilities": ["Read", "Write"],

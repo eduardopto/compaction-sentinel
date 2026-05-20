@@ -27,6 +27,22 @@ args = ["/path/to/compaction-sentinel", "mcp"]
 
 Use `codex mcp list` after installation to confirm visibility.
 
+The MCP server is not the required path for normal checkpoint writes. The installed skill prefers `~/.codex/bin/cs` because the CLI writes the same local ledger through the shell/filesystem path.
+
+## Full Access And Approval Prompts
+
+Codex Full Access covers shell/filesystem access. MCP/plugin tools can still have their own approval UX, depending on the Codex Desktop configuration. Sentinel cannot and should not auto-approve those app-level requests.
+
+For seamless long-running work, use the local CLI for ordinary Sentinel state writes:
+
+```bash
+~/.codex/bin/cs checkpoint --cwd "$PWD" --objective "..." --current-step "..." --next-action "..."
+~/.codex/bin/cs evidence add --cwd "$PWD" "make test passed"
+~/.codex/bin/cs avoid add --cwd "$PWD" "Do not repeat the failed route"
+```
+
+Use MCP when shell access is unavailable or when the user explicitly asks for MCP.
+
 ## Permission Requests
 
 Sentinel records `PermissionRequest` events so repeated approval prompts can be surfaced in the next packet. It does not approve or deny requests. Normal Codex approval UX stays in charge.

@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "0.4.5"
+VERSION = "0.4.6"
 APP_NAME = "Compaction Sentinel"
 DEFAULT_MAX_PACKET_CHARS = 5000
 DEFAULT_LOOP_THRESHOLD = 3

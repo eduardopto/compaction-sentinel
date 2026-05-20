@@ -6,7 +6,7 @@ Compaction Sentinel is intentionally small: record the live state before the mod
 
 1. Skill
 
-The skill teaches Codex how to behave after compaction. It is not sufficient by itself because it depends on Codex deciding to load it.
+The skill teaches Codex how to behave after compaction. It is not sufficient by itself because it depends on Codex deciding to load it. For normal Codex Desktop work, the skill tells Codex to write Sentinel state through `~/.codex/bin/cs` first, because that uses the same local ledger without invoking the separate MCP/plugin approval surface.
 
 2. Hooks
 
@@ -48,7 +48,7 @@ Packet v2 turns ledger state into a ranked brief:
 
 5. MCP Server
 
-MCP tools let Codex explicitly write and query continuity state when available. Hooks still work if MCP is unavailable. Every MCP tool requires an explicit `cwd` so project resolution is deterministic.
+MCP tools let Codex explicitly write and query continuity state when available. Hooks still work if MCP is unavailable. The local CLI is the preferred write path for seamless Full Access runs; MCP remains available when shell access is unavailable or the user explicitly asks for MCP. Every MCP tool requires an explicit `cwd` so project resolution is deterministic.
 
 6. CLI
 

@@ -8,11 +8,13 @@ Compaction Sentinel is not a second agent and not a replacement for OpenAI serve
 2. The hook runtime records compact facts in `~/.codex/compaction-sentinel/sentinel.sqlite`.
 3. On the next session or prompt, Sentinel injects a packet-v2 operating brief as extra context.
 4. Codex sees the active objective, acceptance criteria, current state, next action, do-not-repeat list, blockers, evidence, and loop warnings.
-5. Codex can also use MCP tools to save explicit checkpoints, evidence, notes, avoid-list entries, and status.
+5. Codex can also use the local CLI or MCP tools to save explicit checkpoints, evidence, notes, avoid-list entries, and status.
 
 You do not need to say "use Compaction Sentinel" in every chat after installation and restart.
 
-All MCP tools require an explicit `cwd`. This avoids a subtle but serious reliability bug: a model or MCP server process should never guess which project should receive continuity state.
+The skill prefers the local `~/.codex/bin/cs` CLI for normal Codex Desktop work. Codex Full Access applies to shell/filesystem operations, while MCP/plugin tools may still trigger separate approval prompts in some app configurations. The CLI writes the same local ledger and avoids that extra prompt path.
+
+All MCP tools still require an explicit `cwd`. This avoids a subtle but serious reliability bug: a model or MCP server process should never guess which project should receive continuity state.
 
 ## Runtime Files
 

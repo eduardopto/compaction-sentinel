@@ -406,6 +406,22 @@ class InstallTests(unittest.TestCase):
             self.assertIn("~/.codex/bin/cs checkpoint", text)
             self.assertNotIn("\ncs checkpoint", text)
 
+    def test_skill_prefers_cli_for_seamless_full_access_runs(self) -> None:
+        root = Path(__file__).resolve().parents[1]
+        for skill in (
+            root / "skills" / "compaction-sentinel" / "SKILL.md",
+            root / "src" / "compaction_sentinel" / "assets" / "skills" / "compaction-sentinel" / "SKILL.md",
+        ):
+            text = skill.read_text(encoding="utf-8")
+            self.assertIn("## Seamless Default", text)
+            self.assertIn("prefer the local CLI", text)
+            self.assertIn("Full Access covers shell/filesystem access", text)
+            self.assertIn("Do not request extra permissions just to write Sentinel", text)
+            self.assertIn("Use `compaction_checkpoint` only when the CLI is unavailable", text)
+            self.assertIn("Use `compaction_evidence_add` only when the CLI is unavailable", text)
+            self.assertIn("Use `compaction_avoid_add` only when the CLI is unavailable", text)
+            self.assertNotIn("When available, prefer the `compaction_sentinel` MCP tools", text)
+
 
 if __name__ == "__main__":
     unittest.main()

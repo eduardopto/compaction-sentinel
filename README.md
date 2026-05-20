@@ -31,7 +31,7 @@ With Sentinel:
 Example packet excerpt:
 
 ```xml
-<compaction-sentinel version="0.4.5" schema="packet-v2" reason="session-start">
+<compaction-sentinel version="0.4.6" schema="packet-v2" reason="session-start">
   <active_objective>
   status: active
   objective: Finish auth repair and device verification
@@ -55,6 +55,7 @@ Example packet excerpt:
 - MCP tools: `compaction_checkpoint`, `compaction_evidence_add`, `compaction_avoid_add`, `compaction_note`, `compaction_packet`, `compaction_search`, and `compaction_status`.
 - A strict MCP `cwd` contract so every tool call targets an explicit project.
 - CLI commands for checkpoints, evidence, avoid-list items, scrub/export, retention, config, backups, doctor repair, and uninstall.
+- A CLI-first skill contract for normal Codex Desktop work, so Full Access runs can write Sentinel checkpoints without using the separate MCP/plugin approval surface.
 - Replay evals for stale restarts, repeated failures, false-positive doc/source reads, objective changes, tool-output blindness, redaction, project switching, and Stop continuation loops.
 - Secret redaction for OpenAI keys, GitHub PATs, AWS keys, Google API keys, Slack tokens, JWTs, private keys, bearer tokens, env-style secrets, and high-entropy values.
 - Completed or superseded checkpoints are kept as historical context only; they are never presented as the active objective.
@@ -106,6 +107,18 @@ Verify:
 codex mcp list
 ```
 
+## Seamless Full Access
+
+Codex Full Access covers shell/filesystem permissions. MCP/plugin tools can still show their own approval prompts in some Codex Desktop configurations. Sentinel keeps MCP available, but the installed skill now tells Codex to use the local CLI first for ordinary checkpoint, evidence, avoid-list, packet, and status writes:
+
+```bash
+~/.codex/bin/cs checkpoint --cwd "$PWD" --objective "..." --current-step "..." --next-action "..."
+~/.codex/bin/cs evidence add --cwd "$PWD" "make test passed"
+~/.codex/bin/cs avoid add --cwd "$PWD" "Do not repeat the failed install route"
+```
+
+That path writes the same local SQLite ledger as MCP and should be seamless under Full Access. MCP is still useful when shell access is unavailable or when the user explicitly asks to use MCP, but it is no longer the preferred state-write path in the skill.
+
 ## Quick Use
 
 Create a detailed checkpoint:
@@ -141,7 +154,7 @@ Show the packet Codex will receive:
 ~/.codex/bin/cs packet --cwd "$PWD"
 ```
 
-When Codex uses the MCP tools, it must pass the active project `cwd` every time. Missing `cwd` fails clearly instead of silently writing state to the wrong project.
+When Codex uses the MCP tools, it must pass the active project `cwd` every time. Missing `cwd` fails clearly instead of silently writing state to the wrong project. For normal Full Access work, prefer the CLI examples above to avoid unnecessary MCP approval prompts.
 
 Privacy operations:
 
@@ -222,6 +235,7 @@ Recommended install is still the user-level installer. Current Codex releases lo
 - Sentinel cannot control or replace OpenAI server-side compaction.
 - Hook coverage is a continuity guardrail, not a security boundary for every possible tool path.
 - Codex Desktop may need a restart, and sometimes hook trust approval, before newly installed hooks are active.
+- Full Access does not necessarily auto-approve every MCP/plugin tool call. Sentinel avoids that friction by making the local CLI the normal skill path for state writes.
 - Redaction is best effort. Do not paste secrets into Codex prompts if you can avoid it.
 - Doctor can repair missing Sentinel-owned skill copies when the installed runtime assets are present. If a user has replaced the skill directory with unrelated content, Sentinel preserves it and reports the mismatch instead of deleting it.
 - Auto-continue is off by default because forced continuation can be risky in destructive or ambiguous tasks.

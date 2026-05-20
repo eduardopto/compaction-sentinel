@@ -1,6 +1,6 @@
 # Dogfood Results
 
-This is an internal dogfood report for the v0.4 Reliability Contract, v0.4.1 public-proof follow-up, v0.4.2 false-positive failure-detection hardening, v0.4.3 CLI discoverability hardening, v0.4.4 install/MCP/packet reliability hardening, and v0.4.5 performance hardening. It is not an independent benchmark and it does not claim to control OpenAI server-side compaction. It measures whether Sentinel preserves the local continuity contract around Codex Desktop: objective, next action, evidence, loop warnings, redaction, project resolution, and hot-hook overhead.
+This is an internal dogfood report for the v0.4 Reliability Contract, v0.4.1 public-proof follow-up, v0.4.2 false-positive failure-detection hardening, v0.4.3 CLI discoverability hardening, v0.4.4 install/MCP/packet reliability hardening, v0.4.5 performance hardening, and v0.4.6 seamless Full Access skill hardening. It is not an independent benchmark and it does not claim to control OpenAI server-side compaction. It measures whether Sentinel preserves the local continuity contract around Codex Desktop: objective, next action, evidence, loop warnings, redaction, project resolution, hot-hook overhead, and approval-free local CLI state writes.
 
 ## Real Project Surfaces
 
@@ -27,6 +27,7 @@ Checked on May 18-19, 2026 from the same Mac that runs Codex Desktop:
 | Large noisy runs stay compact | Replay stress records 120 noisy tool results and keeps the packet under budget | 120 events |
 | False failure avoided | Replay fixture repeats doc/source reads whose contents mention failure words without producing a failure-loop warning | 1/1 |
 | CLI fallback avoids PATH drift | Installer tests verify `~/.codex/bin/cs` guidance, PATH warnings, non-Sentinel `cs` shadowing, and opt-in global shim cleanup | 4/4 |
+| Skill avoids MCP approval friction | Skill tests assert normal checkpoint/evidence/avoid/status writes prefer `~/.codex/bin/cs` and reserve MCP for explicit/unavailable-CLI cases | 2/2 |
 
 ## Real Release Run
 

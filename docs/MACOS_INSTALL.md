@@ -42,6 +42,8 @@ Package installs include the skill assets, so they do not require a source check
 
 The guaranteed CLI path is `~/.codex/bin/cs`. Plain `cs` only works if your shell PATH includes `~/.codex/bin` or if you opt in to a global shim.
 
+For normal Full Access Codex Desktop runs, the skill uses the guaranteed CLI path for checkpoint/evidence/status writes. MCP remains installed, but it is secondary because MCP/plugin calls can have a separate approval prompt even when shell/filesystem access is already Full Access.
+
 ## Hook Profiles
 
 The default profile is `balanced`:

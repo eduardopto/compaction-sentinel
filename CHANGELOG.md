@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.4.6
+
+- Changes the installed skill to prefer the local `~/.codex/bin/cs` CLI for normal checkpoint, evidence, avoid-list, packet, and status writes.
+- Keeps MCP tools available, but documents them as secondary for cases where the CLI is unavailable or the user explicitly asks for MCP.
+- Explains the Codex Desktop Full Access distinction: shell/filesystem Full Access does not necessarily suppress separate MCP/plugin approval prompts.
+- Adds troubleshooting and test coverage so future skill edits do not reintroduce MCP-first behavior for ordinary long-running goal work.
+
 ## 0.4.5
 
 - Adds runtime `performance_mode` with `full`, default `balanced`, and `light` settings.
