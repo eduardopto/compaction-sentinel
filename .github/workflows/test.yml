@@ -19,6 +19,7 @@ jobs:
       - run: python -m compileall -q src scripts tests plugin_entry.py
       - run: PYTHONPATH=src python -m unittest discover -s tests
       - run: python scripts/replay_hooks.py tests/fixtures/scenarios/*.jsonl
+      - run: python scripts/benchmark_hooks.py --quick
       - run: python -m pip wheel . -w "$RUNNER_TEMP/cs-wheel"
       - name: Check wheel package data
         run: |

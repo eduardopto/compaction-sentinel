@@ -16,13 +16,19 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "0.4.4"
+VERSION = "0.4.5"
 APP_NAME = "Compaction Sentinel"
-DEFAULT_MAX_PACKET_CHARS = 9000
+DEFAULT_MAX_PACKET_CHARS = 5000
 DEFAULT_LOOP_THRESHOLD = 3
 DEFAULT_RECENT_EVENT_LIMIT = 18
 DEFAULT_MAX_EVENTS_PER_PROJECT = 1200
 DEFAULT_RETENTION_DAYS = 30
+DEFAULT_RETENTION_CHECK_INTERVAL_SECONDS = 3600
+DEFAULT_PRUNE_CHECK_INTERVAL_EVENTS = 50
+DEFAULT_MAX_TOOL_INPUT_CHARS = 1000
+DEFAULT_MAX_TOOL_RESPONSE_CHARS = 1200
+DEFAULT_MAX_READ_ONLY_RESPONSE_CHARS = 300
+PERFORMANCE_MODES = {"full", "balanced", "light"}
 SENSITIVE_VALUE = "[redacted]"
 REPEAT_WARNING_CATEGORIES = {
     "tool_call",
@@ -102,15 +108,22 @@ def log_path(codex_home: Path | None = None) -> Path:
 
 def default_runtime_config() -> dict[str, Any]:
     return {
-        "version": 4,
+        "version": 5,
         "max_packet_chars": DEFAULT_MAX_PACKET_CHARS,
         "loop_threshold": DEFAULT_LOOP_THRESHOLD,
+        "performance_mode": "balanced",
+        "hooks_profile": "balanced",
         "auto_continue": "off",
         "stop_continue_max_per_turn": 1,
         "stop_continue_max_per_checkpoint_per_turn": 1,
         "stop_continue_cooldown_seconds": 0,
         "max_events_per_project": DEFAULT_MAX_EVENTS_PER_PROJECT,
         "retention_days": DEFAULT_RETENTION_DAYS,
+        "retention_check_interval_seconds": DEFAULT_RETENTION_CHECK_INTERVAL_SECONDS,
+        "prune_check_interval_events": DEFAULT_PRUNE_CHECK_INTERVAL_EVENTS,
+        "max_tool_input_chars": DEFAULT_MAX_TOOL_INPUT_CHARS,
+        "max_tool_response_chars": DEFAULT_MAX_TOOL_RESPONSE_CHARS,
+        "max_read_only_response_chars": DEFAULT_MAX_READ_ONLY_RESPONSE_CHARS,
         "redact": True,
         "skills_target": "codex",
         "global_shim_bins": [],
@@ -153,6 +166,11 @@ def config_int(
     return value
 
 
+def performance_mode(config: dict[str, Any]) -> str:
+    mode = str(config.get("performance_mode") or "balanced").strip().lower()
+    return mode if mode in PERFORMANCE_MODES else "balanced"
+
+
 def write_runtime_config(config: dict[str, Any], codex_home: Path | None = None) -> None:
     root = install_root(codex_home)
     root.mkdir(parents=True, exist_ok=True)
@@ -174,11 +192,31 @@ def log(message: str, codex_home: Path | None = None) -> None:
 
 def connect(codex_home: Path | None = None) -> sqlite3.Connection:
     path = db_path(codex_home)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    db = sqlite3.connect(path, timeout=2.0)
-    db.row_factory = sqlite3.Row
-    init_db(db)
-    return db
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        raise RuntimeError(
+            "Sentinel ledger directory is not writable from this environment. "
+            f"Path: {path.parent}. If this came from a sandboxed shell, use MCP/hooks, "
+            "grant filesystem access, or run ~/.codex/bin/cs outside the sandbox."
+        ) from exc
+    db: sqlite3.Connection | None = None
+    try:
+        db = sqlite3.connect(path, timeout=5.0)
+        db.row_factory = sqlite3.Row
+        init_db(db)
+        return db
+    except sqlite3.OperationalError as exc:
+        if db is not None:
+            db.close()
+        message = str(exc)
+        if "unable to open database file" in message or "database is locked" in message:
+            raise RuntimeError(
+                "Sentinel ledger is not writable from this environment. "
+                f"Path: {path}. If this came from a sandboxed shell, use MCP/hooks, "
+                "grant filesystem access, or run ~/.codex/bin/cs outside the sandbox."
+            ) from exc
+        raise
 
 
 def init_db(db: sqlite3.Connection) -> None:
@@ -206,6 +244,8 @@ def init_db(db: sqlite3.Connection) -> None:
           ON events(project_root, id DESC);
         CREATE INDEX IF NOT EXISTS idx_events_fingerprint
           ON events(project_root, fingerprint, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_events_created_at
+          ON events(created_at);
         CREATE TABLE IF NOT EXISTS checkpoints (
           id INTEGER PRIMARY KEY,
           project_root TEXT NOT NULL,
@@ -235,6 +275,8 @@ def init_db(db: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_checkpoints_project_id
           ON checkpoints(project_root, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_checkpoints_created_at
+          ON checkpoints(created_at);
 
         CREATE TABLE IF NOT EXISTS notes (
           id INTEGER PRIMARY KEY,
@@ -248,6 +290,8 @@ def init_db(db: sqlite3.Connection) -> None:
         );
         CREATE INDEX IF NOT EXISTS idx_notes_project_status
           ON notes(project_root, status, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_notes_created_at
+          ON notes(created_at);
 
         CREATE TABLE IF NOT EXISTS state (
           key TEXT PRIMARY KEY,
@@ -388,6 +432,100 @@ def normalize_text(value: Any, limit: int = 3000, *, redact: bool = True) -> str
     return text
 
 
+def stringify_for_storage(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except Exception:
+        return str(value)
+
+
+def compact_by_lines(text: str, limit: int) -> str:
+    text = str(text or "").strip()
+    if len(text) <= limit:
+        return text
+    if limit <= 24:
+        return text[:limit]
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if len(lines) <= 2:
+        return text[: limit - 20].rstrip() + " ...[truncated]"
+    marker = "...[middle truncated]..."
+    first: list[str] = []
+    last: list[str] = []
+    used = len(marker) + 2
+    for line in lines:
+        cost = len(line) + 1
+        if used + cost > limit // 2:
+            break
+        first.append(line)
+        used += cost
+    for line in reversed(lines):
+        cost = len(line) + 1
+        if used + cost > limit:
+            break
+        last.insert(0, line)
+        used += cost
+    compacted = "\n".join([*first, marker, *last]).strip()
+    if len(compacted) > limit:
+        return compacted[: limit - 20].rstrip() + " ...[truncated]"
+    return compacted
+
+
+def failure_context_text(text: str, limit: int) -> str:
+    lines = [line.strip() for line in str(text or "").splitlines() if line.strip()]
+    if not lines:
+        return str(text or "")
+    interesting_indexes = [
+        index
+        for index, line in enumerate(lines)
+        if re.search(r"(?i)\b(failed|failure|traceback|exception|fatal|assert|error|exit[_ -]?code)\b", line)
+    ]
+    if not interesting_indexes:
+        return compact_by_lines(text, limit)
+    selected: list[str] = []
+    seen: set[int] = set()
+    for index in interesting_indexes[:3]:
+        for candidate in range(max(0, index - 2), min(len(lines), index + 4)):
+            if candidate not in seen:
+                selected.append(lines[candidate])
+                seen.add(candidate)
+    return compact_by_lines("\n".join(selected), limit)
+
+
+def compact_tool_response_text(
+    command: str,
+    response: Any,
+    *,
+    outcome: str | None = None,
+    config: dict[str, Any] | None = None,
+    redact: bool = True,
+) -> str:
+    config = config or {}
+    raw = redact_text(stringify_for_storage(response), enabled=redact).strip()
+    if not raw:
+        return ""
+    command_text = command_for_classification(command)
+    max_response = config_int(config, "max_tool_response_chars", DEFAULT_MAX_TOOL_RESPONSE_CHARS, minimum=120)
+    read_only_limit = config_int(
+        config,
+        "max_read_only_response_chars",
+        DEFAULT_MAX_READ_ONLY_RESPONSE_CHARS,
+        minimum=80,
+    )
+    summary = f"Bash: {command} -> {raw}"
+    failed = is_failure_summary(summary, outcome)
+    if is_read_only_command(command_text) and not failed:
+        return normalize_text(compact_by_lines(raw, read_only_limit), read_only_limit, redact=False)
+    if is_test_or_build_command(command_text) and not failed:
+        return normalize_text(compact_by_lines(raw, max_response), max_response, redact=False)
+    if failed:
+        return normalize_text(failure_context_text(raw, max_response), max_response, redact=False)
+    return normalize_text(raw, max_response, redact=False)
+
+
 def sanitize_json(value: Any, *, text_limit: int = 3000, redact: bool = True) -> Any:
     if isinstance(value, str):
         return normalize_text(value, text_limit, redact=redact)
@@ -499,15 +637,20 @@ def extract_tool_use_id(payload: dict[str, Any]) -> str:
     return ""
 
 
-def extract_tool_input(payload: dict[str, Any], *, redact: bool = True) -> str:
+def extract_tool_input(
+    payload: dict[str, Any],
+    *,
+    redact: bool = True,
+    limit: int = DEFAULT_MAX_TOOL_INPUT_CHARS,
+) -> str:
     value = payload.get("tool_input")
     if value is None:
         value = payload.get("input")
     if isinstance(value, dict):
         command = value.get("command") or value.get("cmd")
         if isinstance(command, str) and command.strip():
-            return normalize_text(command, 3000, redact=redact)
-    return normalize_text(value, 3000, redact=redact)
+            return normalize_text(command, limit, redact=redact)
+    return normalize_text(value, limit, redact=redact)
 
 
 def extract_permission_reason(payload: dict[str, Any], *, redact: bool = True) -> str:
@@ -522,7 +665,13 @@ def extract_permission_reason(payload: dict[str, Any], *, redact: bool = True) -
     return ""
 
 
-def extract_tool_response(payload: dict[str, Any], *, redact: bool = True) -> tuple[str, str | None]:
+def extract_tool_response(
+    payload: dict[str, Any],
+    *,
+    redact: bool = True,
+    command: str = "",
+    config: dict[str, Any] | None = None,
+) -> tuple[str, str | None]:
     value = payload.get("tool_response")
     if value is None:
         value = payload.get("response") or payload.get("output") or payload.get("result")
@@ -537,8 +686,14 @@ def extract_tool_response(payload: dict[str, Any], *, redact: bool = True) -> tu
             for key in ("stdout", "stderr", "output", "error", "status", "exit_code", "result")
             if key in value
         }
-        return normalize_text(combined or value, 3000, redact=redact), outcome
-    return normalize_text(value, 3000, redact=redact), outcome
+        return compact_tool_response_text(
+            command,
+            combined or value,
+            outcome=outcome,
+            config=config,
+            redact=redact,
+        ), outcome
+    return compact_tool_response_text(command, value, outcome=outcome, config=config, redact=redact), outcome
 
 
 def extract_last_assistant(payload: dict[str, Any], *, redact: bool = True) -> str:
@@ -807,6 +962,8 @@ def record_event(
     redact: bool = True,
     max_events: int = DEFAULT_MAX_EVENTS_PER_PROJECT,
     retention_days: int = DEFAULT_RETENTION_DAYS,
+    retention_check_interval_seconds: int = DEFAULT_RETENTION_CHECK_INTERVAL_SECONDS,
+    prune_check_interval_events: int = DEFAULT_PRUNE_CHECK_INTERVAL_EVENTS,
 ) -> sqlite3.Row:
     clean_summary = normalize_text(summary, 4000, redact=redact)
     clean_details = sanitize_json(details or {}, redact=redact)
@@ -847,10 +1004,64 @@ def record_event(
         ).fetchone()
     else:
         row = db.execute("SELECT * FROM events WHERE id = last_insert_rowid()").fetchone()
-    prune_events(db, project, max_events=max_events)
-    apply_retention(db, retention_days=retention_days)
+    maybe_prune_events(
+        db,
+        project,
+        max_events=max_events,
+        interval_events=prune_check_interval_events,
+    )
+    maybe_apply_retention(
+        db,
+        retention_days=retention_days,
+        interval_seconds=retention_check_interval_seconds,
+    )
     assert row is not None
     return row
+
+
+def maintenance_last_retention_key() -> str:
+    return "maintenance:last_retention_at"
+
+
+def project_prune_count_key(project: Project) -> str:
+    return f"{project_state_prefix(project)}maintenance:event_count_since_prune"
+
+
+def maybe_apply_retention(
+    db: sqlite3.Connection,
+    *,
+    retention_days: int = DEFAULT_RETENTION_DAYS,
+    interval_seconds: int = DEFAULT_RETENTION_CHECK_INTERVAL_SECONDS,
+) -> None:
+    if retention_days <= 0:
+        return
+    key = maintenance_last_retention_key()
+    if interval_seconds > 0 and within_cooldown(get_state(db, key), interval_seconds):
+        return
+    apply_retention(db, retention_days=retention_days)
+    set_state(db, key, utc_now())
+
+
+def maybe_prune_events(
+    db: sqlite3.Connection,
+    project: Project,
+    *,
+    max_events: int = DEFAULT_MAX_EVENTS_PER_PROJECT,
+    interval_events: int = DEFAULT_PRUNE_CHECK_INTERVAL_EVENTS,
+) -> None:
+    if max_events <= 0:
+        return
+    if interval_events <= 1:
+        prune_events(db, project, max_events=max_events)
+        set_state(db, project_prune_count_key(project), "0")
+        return
+    key = project_prune_count_key(project)
+    count = state_count(db, key) + 1
+    if count < interval_events:
+        set_state(db, key, str(count))
+        return
+    prune_events(db, project, max_events=max_events)
+    set_state(db, key, "0")
 
 
 def prune_events(
@@ -1194,16 +1405,26 @@ def loop_warnings(
     *,
     fingerprint_value: str | None = None,
     threshold: int = DEFAULT_LOOP_THRESHOLD,
+    include_failure_loop: bool = True,
+    include_investigation_loop: bool = True,
+    include_tool_output_blindness: bool = True,
 ) -> list[str]:
-    return regression_warnings(
+    warnings = repeat_warnings(
         db,
         project,
         fingerprint_value=fingerprint_value,
         threshold=threshold,
     )
+    if include_failure_loop:
+        warnings.extend(failure_loop_warnings(db, project, threshold=threshold))
+    if include_investigation_loop:
+        warnings.extend(investigation_loop_warnings(db, project, threshold=max(threshold + 1, 4)))
+    if include_tool_output_blindness:
+        warnings.extend(tool_output_blindness_warnings(db, project))
+    return dedupe_keep_order(warnings)[:8]
 
 
-def regression_warnings(
+def repeat_warnings(
     db: sqlite3.Connection,
     project: Project,
     *,
@@ -1239,10 +1460,7 @@ def regression_warnings(
         if category not in REPEAT_WARNING_CATEGORIES:
             continue
         warnings.append(f"{warning_label(category)} repeated {row['count']} times: {summary[:220]}")
-    warnings.extend(failure_loop_warnings(db, project, threshold=threshold))
-    warnings.extend(investigation_loop_warnings(db, project, threshold=max(threshold + 1, 4)))
-    warnings.extend(tool_output_blindness_warnings(db, project))
-    return dedupe_keep_order(warnings)[:8]
+    return warnings[:5]
 
 
 def warning_label(category: str) -> str:
@@ -1866,6 +2084,57 @@ def maybe_stop_continue(
     return {"decision": "block", "reason": reason}
 
 
+def should_record_pre_tool(mode: str, command: str) -> bool:
+    if mode == "full":
+        return True
+    if mode == "light":
+        return is_test_or_build_command(command)
+    return True
+
+
+def should_record_post_tool(mode: str, command: str, response: str, outcome: str | None) -> bool:
+    if mode == "full":
+        return True
+    summary = f"Bash: {command}"
+    if response:
+        summary += f" -> {response}"
+    failed = is_failure_summary(summary, outcome)
+    if mode == "light":
+        return failed or is_test_or_build_command(command)
+    return True
+
+
+def pre_tool_warnings(
+    db: sqlite3.Connection,
+    project: Project,
+    row: sqlite3.Row,
+    *,
+    threshold: int,
+    mode: str,
+) -> list[str]:
+    if mode == "light":
+        return []
+    return repeat_warnings(db, project, fingerprint_value=row["fingerprint"], threshold=threshold)
+
+
+def post_tool_warnings(
+    db: sqlite3.Connection,
+    project: Project,
+    row: sqlite3.Row,
+    *,
+    command: str,
+    threshold: int,
+    mode: str,
+) -> list[str]:
+    if mode == "light":
+        return []
+    warnings = repeat_warnings(db, project, fingerprint_value=row["fingerprint"], threshold=threshold)
+    category = str(row["category"] or "")
+    if category == "tool_failure" or is_test_or_build_command(command):
+        warnings.extend(failure_loop_warnings(db, project, threshold=threshold))
+    return dedupe_keep_order(warnings)[:8]
+
+
 def handle_hook(event_name: str, payload: dict[str, Any], codex_home: Path | None = None) -> dict[str, Any]:
     db = connect(codex_home)
     try:
@@ -1888,6 +2157,20 @@ def _handle_hook(
     max_chars = config_int(config, "max_packet_chars", DEFAULT_MAX_PACKET_CHARS, minimum=500)
     max_events = config_int(config, "max_events_per_project", DEFAULT_MAX_EVENTS_PER_PROJECT, minimum=0)
     retention_days = config_int(config, "retention_days", DEFAULT_RETENTION_DAYS, minimum=0)
+    retention_interval = config_int(
+        config,
+        "retention_check_interval_seconds",
+        DEFAULT_RETENTION_CHECK_INTERVAL_SECONDS,
+        minimum=0,
+    )
+    prune_interval = config_int(
+        config,
+        "prune_check_interval_events",
+        DEFAULT_PRUNE_CHECK_INTERVAL_EVENTS,
+        minimum=1,
+    )
+    input_limit = config_int(config, "max_tool_input_chars", DEFAULT_MAX_TOOL_INPUT_CHARS, minimum=120)
+    mode = performance_mode(config)
 
     if event_name == "UserPromptSubmit":
         prompt = extract_prompt(payload, redact=redact)
@@ -1902,6 +2185,8 @@ def _handle_hook(
             redact=redact,
             max_events=max_events,
             retention_days=retention_days,
+            retention_check_interval_seconds=retention_interval,
+            prune_check_interval_events=prune_interval,
         )
         update_checkpoint_from_prompt(db, project, payload, prompt, redact=redact)
         packet = build_resume_packet(
@@ -1931,6 +2216,8 @@ def _handle_hook(
             redact=redact,
             max_events=max_events,
             retention_days=retention_days,
+            retention_check_interval_seconds=retention_interval,
+            prune_check_interval_events=prune_interval,
         )
         packet = build_resume_packet(
             db,
@@ -1943,7 +2230,9 @@ def _handle_hook(
 
     if event_name == "PreToolUse":
         tool_name = extract_tool_name(payload)
-        tool_input = extract_tool_input(payload, redact=redact)
+        tool_input = extract_tool_input(payload, redact=redact, limit=input_limit)
+        if not should_record_pre_tool(mode, tool_input):
+            return {}
         row = record_event(
             db,
             project,
@@ -1955,8 +2244,10 @@ def _handle_hook(
             redact=redact,
             max_events=max_events,
             retention_days=retention_days,
+            retention_check_interval_seconds=retention_interval,
+            prune_check_interval_events=prune_interval,
         )
-        warnings = loop_warnings(db, project, fingerprint_value=row["fingerprint"], threshold=loop_threshold)
+        warnings = pre_tool_warnings(db, project, row, threshold=loop_threshold, mode=mode)
         if warnings:
             return hook_output(
                 event_name,
@@ -1969,7 +2260,7 @@ def _handle_hook(
 
     if event_name == "PermissionRequest":
         tool_name = extract_tool_name(payload)
-        tool_input = extract_tool_input(payload, redact=redact)
+        tool_input = extract_tool_input(payload, redact=redact, limit=input_limit)
         reason = extract_permission_reason(payload, redact=redact)
         checkpoint = active_checkpoint(db, project)
         summary = tool_input or f"{tool_name} permission requested"
@@ -1991,8 +2282,10 @@ def _handle_hook(
             redact=redact,
             max_events=max_events,
             retention_days=retention_days,
+            retention_check_interval_seconds=retention_interval,
+            prune_check_interval_events=prune_interval,
         )
-        warnings = loop_warnings(db, project, fingerprint_value=row["fingerprint"], threshold=loop_threshold)
+        warnings = repeat_warnings(db, project, fingerprint_value=row["fingerprint"], threshold=loop_threshold)
         if warnings:
             return {
                 "systemMessage": "Repeated permission request detected. Compaction Sentinel recorded it but will not approve or deny it automatically."
@@ -2001,8 +2294,10 @@ def _handle_hook(
 
     if event_name == "PostToolUse":
         tool_name = extract_tool_name(payload)
-        response, outcome = extract_tool_response(payload, redact=redact)
-        tool_input = extract_tool_input(payload, redact=redact)
+        tool_input = extract_tool_input(payload, redact=redact, limit=input_limit)
+        response, outcome = extract_tool_response(payload, redact=redact, command=tool_input, config=config)
+        if not should_record_post_tool(mode, tool_input, response, outcome):
+            return {}
         summary = f"{tool_name}: {tool_input}"
         if response:
             summary += f" -> {response}"
@@ -2018,8 +2313,17 @@ def _handle_hook(
             redact=redact,
             max_events=max_events,
             retention_days=retention_days,
+            retention_check_interval_seconds=retention_interval,
+            prune_check_interval_events=prune_interval,
         )
-        warnings = loop_warnings(db, project, fingerprint_value=row["fingerprint"], threshold=loop_threshold)
+        warnings = post_tool_warnings(
+            db,
+            project,
+            row,
+            command=tool_input,
+            threshold=loop_threshold,
+            mode=mode,
+        )
         if warnings:
             return hook_output(
                 event_name,
@@ -2043,10 +2347,21 @@ def _handle_hook(
             redact=redact,
             max_events=max_events,
             retention_days=retention_days,
+            retention_check_interval_seconds=retention_interval,
+            prune_check_interval_events=prune_interval,
         )
+        warnings = loop_warnings(db, project, threshold=loop_threshold)
         continuation = maybe_stop_continue(db, project, payload, config)
         if continuation:
             return continuation
+        if warnings:
+            return hook_output(
+                event_name,
+                "Compaction Sentinel stop warning:\n"
+                + "\n".join(f"- {warning}" for warning in warnings)
+                + "\nInspect the latest concrete output before claiming completion.",
+                "Compaction Sentinel detected a possible stop-time regression.",
+            )
         return {}
 
     record_event(
@@ -2060,6 +2375,8 @@ def _handle_hook(
         redact=redact,
         max_events=max_events,
         retention_days=retention_days,
+        retention_check_interval_seconds=retention_interval,
+        prune_check_interval_events=prune_interval,
     )
     return {}
 

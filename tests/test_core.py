@@ -16,9 +16,12 @@ from compaction_sentinel.core import (
     infer_objective,
     is_failure_summary,
     looks_complete,
+    maintenance_last_retention_key,
     project_from_payload,
+    project_prune_count_key,
     project_state_prefix,
     redact_text,
+    record_event,
     save_checkpoint,
     scrub_project,
 )
@@ -102,7 +105,87 @@ class CoreTests(unittest.TestCase):
             db = connect(home)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(events)").fetchall()}
             self.assertIn("event_key", columns)
+            indexes = {row["name"] for row in db.execute("PRAGMA index_list(events)").fetchall()}
+            self.assertIn("idx_events_created_at", indexes)
             db.close()
+
+    def test_retention_is_throttled_but_still_runs_when_due(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            project_path.mkdir()
+            (project_path / ".git").mkdir()
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            try:
+                first = record_event(
+                    db,
+                    project,
+                    {"cwd": str(project_path), "tool_use_id": "old"},
+                    event_name="PreToolUse",
+                    kind="tool:Bash",
+                    summary="pytest old",
+                    retention_days=1,
+                    retention_check_interval_seconds=3600,
+                )
+                db.execute("UPDATE events SET created_at = ? WHERE id = ?", ("2000-01-01T00:00:00+00:00", first["id"]))
+                db.commit()
+                record_event(
+                    db,
+                    project,
+                    {"cwd": str(project_path), "tool_use_id": "skip"},
+                    event_name="PreToolUse",
+                    kind="tool:Bash",
+                    summary="pytest skip retention",
+                    retention_days=1,
+                    retention_check_interval_seconds=3600,
+                )
+                old_count = db.execute("SELECT COUNT(*) AS count FROM events WHERE id = ?", (first["id"],)).fetchone()
+                self.assertEqual(int(old_count["count"]), 1)
+                self.assertIsNotNone(get_state(db, maintenance_last_retention_key()))
+                record_event(
+                    db,
+                    project,
+                    {"cwd": str(project_path), "tool_use_id": "due"},
+                    event_name="PreToolUse",
+                    kind="tool:Bash",
+                    summary="pytest force retention",
+                    retention_days=1,
+                    retention_check_interval_seconds=0,
+                )
+                old_count = db.execute("SELECT COUNT(*) AS count FROM events WHERE id = ?", (first["id"],)).fetchone()
+                self.assertEqual(int(old_count["count"]), 0)
+            finally:
+                db.close()
+
+    def test_project_prune_is_throttled_by_event_count(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            project_path.mkdir()
+            (project_path / ".git").mkdir()
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            try:
+                save_checkpoint(db, project, objective="Keep checkpoint", next_action="Keep working")
+                for index in range(20):
+                    record_event(
+                        db,
+                        project,
+                        {"cwd": str(project_path), "tool_use_id": f"tool-{index}"},
+                        event_name="PreToolUse",
+                        kind="tool:Bash",
+                        summary=f"pytest test_{index}",
+                        max_events=3,
+                        prune_check_interval_events=5,
+                    )
+                event_count = db.execute("SELECT COUNT(*) AS count FROM events WHERE project_root = ?", (str(project.root),)).fetchone()
+                checkpoint_count = db.execute("SELECT COUNT(*) AS count FROM checkpoints WHERE project_root = ?", (str(project.root),)).fetchone()
+                self.assertLessEqual(int(event_count["count"]), 3)
+                self.assertEqual(int(checkpoint_count["count"]), 1)
+                self.assertEqual(get_state(db, project_prune_count_key(project)), "0")
+            finally:
+                db.close()
 
     def test_loop_warning_after_repeated_tool(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -530,6 +613,115 @@ class CoreTests(unittest.TestCase):
             db.close()
             self.assertEqual(categories, ["tool_result", "tool_result", "tool_result"])
 
+    def test_read_only_tool_response_is_compacted_by_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            config_path = home / "compaction-sentinel" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps({"max_read_only_response_chars": 120, "max_tool_response_chars": 300}),
+                encoding="utf-8",
+            )
+            huge = "\n".join(f"line {index} with ordinary documentation text" for index in range(80))
+            handle_hook(
+                "PostToolUse",
+                {
+                    "cwd": str(project),
+                    "session_id": "s1",
+                    "turn_id": "t1",
+                    "tool_use_id": "read-big",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "sed -n '1,200p' docs/large.md"},
+                    "tool_response": huge,
+                },
+                codex_home=home,
+            )
+            db = connect(home)
+            row = db.execute("SELECT summary, details_json FROM events ORDER BY id DESC LIMIT 1").fetchone()
+            db.close()
+            self.assertLess(len(row["summary"]), 260)
+            self.assertLess(len(row["details_json"]), 420)
+            self.assertIn("middle truncated", row["summary"])
+
+    def test_failure_tool_response_keeps_error_context(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            config_path = home / "compaction-sentinel" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(json.dumps({"max_tool_response_chars": 260}), encoding="utf-8")
+            noisy_failure = "\n".join(
+                ["setup noise"] * 30
+                + ["FAILED tests/test_app.py::test_save", "AssertionError: expected durable checkpoint"]
+                + ["tail noise"] * 30
+            )
+            handle_hook(
+                "PostToolUse",
+                {
+                    "cwd": str(project),
+                    "session_id": "s1",
+                    "turn_id": "t1",
+                    "tool_use_id": "test-fail-big",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "pytest tests/test_app.py"},
+                    "tool_response": noisy_failure,
+                },
+                codex_home=home,
+            )
+            db = connect(home)
+            row = db.execute("SELECT summary, category FROM events ORDER BY id DESC LIMIT 1").fetchone()
+            db.close()
+            self.assertEqual(row["category"], "tool_failure")
+            self.assertIn("AssertionError", row["summary"])
+            self.assertLess(len(row["summary"]), 420)
+
+    def test_light_performance_mode_records_only_hot_milestones(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            config_path = home / "compaction-sentinel" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(json.dumps({"performance_mode": "light"}), encoding="utf-8")
+            handle_hook(
+                "PostToolUse",
+                {
+                    "cwd": str(project),
+                    "session_id": "s1",
+                    "turn_id": "t1",
+                    "tool_use_id": "read-light",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "sed -n '1,20p' README.md"},
+                    "tool_response": "README contents",
+                },
+                codex_home=home,
+            )
+            handle_hook(
+                "PostToolUse",
+                {
+                    "cwd": str(project),
+                    "session_id": "s1",
+                    "turn_id": "t1",
+                    "tool_use_id": "fail-light",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "pytest tests/test_app.py"},
+                    "tool_response": "FAILED tests/test_app.py::test_save - AssertionError",
+                },
+                codex_home=home,
+            )
+            db = connect(home)
+            rows = db.execute("SELECT summary, category FROM events ORDER BY id").fetchall()
+            db.close()
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(rows[0]["category"], "tool_failure")
+            self.assertIn("pytest", rows[0]["summary"])
+
     def test_repeated_test_failures_still_emit_failure_loop_warning(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp) / "codex"
@@ -553,6 +745,37 @@ class CoreTests(unittest.TestCase):
                 )
             text = json.dumps(out)
             self.assertIn("Same failure loop", text)
+
+    def test_stop_catches_tool_output_blindness(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            handle_hook(
+                "PostToolUse",
+                {
+                    "cwd": str(project),
+                    "session_id": "s1",
+                    "turn_id": "t1",
+                    "tool_use_id": "failed-test",
+                    "tool_name": "Bash",
+                    "tool_input": {"command": "pytest tests/test_app.py"},
+                    "tool_response": "FAILED tests/test_app.py::test_save - AssertionError",
+                },
+                codex_home=home,
+            )
+            out = handle_hook(
+                "Stop",
+                {
+                    "cwd": str(project),
+                    "session_id": "s1",
+                    "turn_id": "t1",
+                    "last_assistant_message": "Goal complete. Completed and verified.",
+                },
+                codex_home=home,
+            )
+            self.assertIn("Tool-output blindness risk", json.dumps(out))
 
     def test_shell_wrappers_preserve_failure_classification(self) -> None:
         doc_response = "This file mentions error: fatal, traceback, exception, and failed as documentation text."
@@ -664,10 +887,14 @@ class CoreTests(unittest.TestCase):
             self.assertTrue(any(key.startswith(project_state_prefix(project)) for key in state_keys))
             self.assertFalse(any(str(project.root) in key for key in state_keys))
             counts = scrub_project(db, project)
-            remaining = db.execute("SELECT COUNT(*) AS count FROM state").fetchone()
+            remaining_project = [
+                row["key"]
+                for row in db.execute("SELECT key FROM state ORDER BY key").fetchall()
+                if str(row["key"]).startswith(project_state_prefix(project))
+            ]
             db.close()
             self.assertGreater(counts["state"], 0)
-            self.assertEqual(int(remaining["count"]), 0)
+            self.assertEqual(remaining_project, [])
 
 
 if __name__ == "__main__":

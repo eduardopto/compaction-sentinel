@@ -1,4 +1,4 @@
-.PHONY: test compile replay doctor
+.PHONY: test compile replay benchmark doctor
 
 PYTHON ?= python3
 
@@ -7,6 +7,9 @@ test:
 
 replay:
 	$(PYTHON) scripts/replay_hooks.py tests/fixtures/scenarios/*.jsonl
+
+benchmark:
+	$(PYTHON) scripts/benchmark_hooks.py
 
 compile:
 	$(PYTHON) -m compileall -q src scripts tests plugin_entry.py

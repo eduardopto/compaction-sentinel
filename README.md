@@ -31,7 +31,7 @@ With Sentinel:
 Example packet excerpt:
 
 ```xml
-<compaction-sentinel version="0.4.4" schema="packet-v2" reason="session-start">
+<compaction-sentinel version="0.4.5" schema="packet-v2" reason="session-start">
   <active_objective>
   status: active
   objective: Finish auth repair and device verification
@@ -47,9 +47,11 @@ Example packet excerpt:
 
 ## What It Adds
 
-- User-level Codex hooks for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
+- User-level Codex hooks for the selected hook profile. The default `balanced` profile installs `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
 - Packet v2: a ranked operating brief with authority, objective, acceptance criteria, current state, next action, do-not-repeat items, blockers, evidence, and recent trail.
 - A local SQLite ledger under `~/.codex/compaction-sentinel/`.
+- Runtime performance modes: `full`, `balanced` default, and `light`.
+- Install hook profiles: `full`/`balanced` install all hooks; `light` omits the hot `PreToolUse`/`PostToolUse` hooks and keeps startup, prompt, permission, Stop, skill, and MCP protection.
 - MCP tools: `compaction_checkpoint`, `compaction_evidence_add`, `compaction_avoid_add`, `compaction_note`, `compaction_packet`, `compaction_search`, and `compaction_status`.
 - A strict MCP `cwd` contract so every tool call targets an explicit project.
 - CLI commands for checkpoints, evidence, avoid-list items, scrub/export, retention, config, backups, doctor repair, and uninstall.
@@ -57,6 +59,7 @@ Example packet excerpt:
 - Secret redaction for OpenAI keys, GitHub PATs, AWS keys, Google API keys, Slack tokens, JWTs, private keys, bearer tokens, env-style secrets, and high-entropy values.
 - Completed or superseded checkpoints are kept as historical context only; they are never presented as the active objective.
 - Doctor and uninstall treat Sentinel-owned skill copies as install artifacts, while preserving unrelated user skill directories.
+- Throttled retention/prune maintenance, compact event storage, and cheaper hot-hook warning checks reduce overhead in long sessions.
 - Fail-open hooks. If Sentinel crashes, Codex work continues.
 
 ## Dogfood Results
@@ -73,6 +76,12 @@ Recommended from a checkout:
 git clone https://github.com/eduardopto/compaction-sentinel.git
 cd compaction-sentinel
 python3 scripts/install.py --doctor
+```
+
+Balanced is the default. For a lighter install on huge long-running projects:
+
+```bash
+python3 scripts/install.py --doctor --hooks-profile light
 ```
 
 Pipx/uvx-friendly install from GitHub:
@@ -159,6 +168,23 @@ Plain `cs` is optional. The guaranteed CLI path is `~/.codex/bin/cs`; if a shell
 
 Sentinel records opt-in global shim directories and removes only recorded Sentinel-owned global shims during uninstall.
 
+Performance controls:
+
+```bash
+~/.codex/bin/cs config set performance_mode balanced
+~/.codex/bin/cs config set performance_mode light
+~/.codex/bin/cs config set max_packet_chars 4000
+~/.codex/bin/cs retention set --days 7
+python scripts/benchmark_hooks.py
+```
+
+Changing `hooks_profile` affects the installed hook set after repair:
+
+```bash
+~/.codex/bin/cs config set hooks_profile light
+~/.codex/bin/cs doctor --fix --explain
+```
+
 Uninstall:
 
 ```bash
@@ -199,6 +225,7 @@ Recommended install is still the user-level installer. Current Codex releases lo
 - Redaction is best effort. Do not paste secrets into Codex prompts if you can avoid it.
 - Doctor can repair missing Sentinel-owned skill copies when the installed runtime assets are present. If a user has replaced the skill directory with unrelated content, Sentinel preserves it and reports the mismatch instead of deleting it.
 - Auto-continue is off by default because forced continuation can be risky in destructive or ambiguous tasks.
+- Very large Codex sessions can still feel slow because of model context, project size, tool count, app rendering, compaction itself, and any installed hooks. Use `performance_mode light` or `--hooks-profile light` to trade hot-hook coverage for less overhead.
 - Dogfood results are internal and replay-backed, not an independent third-party benchmark.
 
 ## Development
@@ -207,6 +234,7 @@ Recommended install is still the user-level installer. Current Codex releases lo
 make compile
 make test
 make replay
+python scripts/benchmark_hooks.py --quick
 python3 -m pip wheel . -w /tmp/compaction-sentinel-wheel
 ```
 

@@ -19,10 +19,12 @@ When Compaction Sentinel is installed, hooks should already inject a resume pack
 6. If the packet and repository disagree, verify the repository and update the checkpoint.
 7. Do not treat a loop warning as proof of failure; inspect the latest concrete output and then choose a different hypothesis.
 8. Always pass the active project `cwd` when calling any Compaction Sentinel MCP tool.
-9. After tests, builds, installs, or other meaningful tool results, call `compaction_evidence_add` with the exact `cwd` and a compact evidence note.
+9. After tests, builds, installs, or other meaningful milestone results, call `compaction_evidence_add` with the exact `cwd` and a compact evidence note.
 10. After a repeated failed route or ruled-out hypothesis, call `compaction_avoid_add` with the exact `cwd`.
 11. Before claiming completion, verify the user's acceptance criteria and the latest tool output. Do not claim completion from a checkpoint alone.
 12. When this skill is invoked for a long-running task and no active checkpoint exists, immediately call `compaction_checkpoint` with `cwd`, objective, acceptance criteria if available, current step, next action, and confidence before doing extended work.
+13. Do not call evidence tools after routine file reads, searches, or tiny inspection commands. Batch evidence at milestones.
+14. Prefer one checkpoint per meaningful state transition, not one checkpoint after every tool call.
 
 ## MCP Tools
 

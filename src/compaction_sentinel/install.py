@@ -28,6 +28,11 @@ HOOK_EVENTS = {
     "PostToolUse": 5,
     "Stop": 10,
 }
+HOOK_PROFILES = {
+    "full": tuple(HOOK_EVENTS),
+    "balanced": tuple(HOOK_EVENTS),
+    "light": ("SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop"),
+}
 
 
 def hook_command(codex_home: Path, event_name: str) -> str:
@@ -92,6 +97,7 @@ def install(
     enable_stop_continue: bool = False,
     auto_continue: str | None = None,
     skills_target: str = "both",
+    hooks_profile: str = "balanced",
     global_bin: Path | None = None,
     dry_run: bool = False,
 ) -> dict[str, Any]:
@@ -100,13 +106,14 @@ def install(
     ensure_source_assets(source_root)
     actions: list[str] = []
     actual_auto_continue = auto_continue or ("gentle" if enable_stop_continue else None)
+    normalized_hooks_profile = normalize_hooks_profile(hooks_profile)
     if global_bin is not None:
         global_bin = normalize_bin_dir(global_bin)
         validate_global_bin_available(global_bin)
     if not dry_run:
         install_package(source_root, codex_home)
         install_skill(source_root, codex_home, skills_target)
-        merge_hooks(codex_home)
+        merge_hooks(codex_home, hooks_profile=normalized_hooks_profile)
         merge_mcp_config(codex_home)
         ensure_hooks_feature(codex_home)
         config = load_runtime_config(codex_home)
@@ -114,6 +121,8 @@ def install(
             install_global_links(global_bin, launcher_path(codex_home))
             remember_global_bin(config, global_bin)
         config["skills_target"] = normalize_skills_target(skills_target)
+        config["hooks_profile"] = normalized_hooks_profile
+        config["performance_mode"] = normalized_hooks_profile
         if actual_auto_continue is not None:
             config["auto_continue"] = actual_auto_continue
         actual_auto_continue = str(config.get("auto_continue") or "off")
@@ -126,6 +135,7 @@ def install(
             f"hooks -> {codex_home / 'hooks.json'}",
             f"mcp -> {codex_home / 'config.toml'}",
             f"skills_target -> {skills_target}",
+            f"hooks_profile -> {normalized_hooks_profile}",
             f"auto_continue -> {actual_auto_continue}",
         ]
     )
@@ -258,6 +268,15 @@ def normalize_skills_target(target: Any) -> str:
     return value if value in {"codex", "agents", "both"} else "codex"
 
 
+def normalize_hooks_profile(profile: Any) -> str:
+    value = str(profile or "balanced").strip().lower()
+    return value if value in HOOK_PROFILES else "balanced"
+
+
+def hook_events_for_profile(profile: Any) -> tuple[str, ...]:
+    return HOOK_PROFILES[normalize_hooks_profile(profile)]
+
+
 def skill_target_paths(codex_home: Path, target: Any) -> dict[str, Path]:
     normalized = normalize_skills_target(target)
     paths: dict[str, Path] = {}
@@ -337,7 +356,7 @@ def sentinel_hook_group(codex_home: Path, event_name: str, timeout: int) -> dict
     return group
 
 
-def merge_hooks(codex_home: Path) -> None:
+def merge_hooks(codex_home: Path, *, hooks_profile: str = "balanced") -> None:
     hooks_path = codex_home / "hooks.json"
     backup_file(hooks_path)
     data: dict[str, Any] = {"hooks": {}}
@@ -350,9 +369,12 @@ def merge_hooks(codex_home: Path) -> None:
             backup = hooks_path.with_suffix(".json.bak")
             shutil.copy2(hooks_path, backup)
     hooks = data.setdefault("hooks", {})
-    for event_name, timeout in HOOK_EVENTS.items():
+    for event_name, groups in list(hooks.items()):
+        if isinstance(groups, list):
+            hooks[event_name] = [group for group in groups if not hook_group_has_marker(group)]
+    for event_name in hook_events_for_profile(hooks_profile):
+        timeout = HOOK_EVENTS[event_name]
         groups = hooks.setdefault(event_name, [])
-        groups[:] = [group for group in groups if not hook_group_has_marker(group)]
         groups.append(sentinel_hook_group(codex_home, event_name, timeout))
     codex_home.mkdir(parents=True, exist_ok=True)
     atomic_write_text(hooks_path, json.dumps(data, indent=2) + "\n")
@@ -594,6 +616,8 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
     path_cli = shutil.which("cs")
     path_cli_owned = sentinel_path_owned(path_cli)
     config = load_runtime_config(codex_home)
+    hooks_profile = normalize_hooks_profile(config.get("hooks_profile") or "balanced")
+    expected_hooks = set(hook_events_for_profile(hooks_profile))
     skills_target = normalize_skills_target(config.get("skills_target") or "codex")
     skill_status = {
         label: {
@@ -616,8 +640,26 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
         issues.append("python is older than 3.11")
     if not root.exists():
         issues.append("runtime is missing")
-    if not all(hooks_by_event.values()):
-        issues.append("one or more Compaction Sentinel hook entries are missing")
+    missing_expected_hooks = [event_name for event_name in hook_events_for_profile(hooks_profile) if not hooks_by_event[event_name]]
+    unexpected_hooks = [
+        event_name
+        for event_name, present in hooks_by_event.items()
+        if present and event_name not in expected_hooks
+    ]
+    if missing_expected_hooks:
+        issues.append(
+            "one or more Compaction Sentinel hook entries are missing for hooks_profile="
+            + hooks_profile
+            + ": "
+            + ", ".join(missing_expected_hooks)
+        )
+    if unexpected_hooks:
+        warnings.append(
+            "Compaction Sentinel has hot hooks outside hooks_profile="
+            + hooks_profile
+            + ": "
+            + ", ".join(unexpected_hooks)
+        )
     if not mcp_present:
         issues.append("compaction_sentinel MCP config is missing")
     if not hooks_feature_present:
@@ -636,6 +678,18 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
     missing_global_links = [path for path, owned in global_cli_links.items() if not owned]
     if missing_global_links:
         warnings.append("recorded global Sentinel shim is missing or not owned: " + ", ".join(missing_global_links))
+    ledger_writable = False
+    ledger_error = ""
+    if root.exists():
+        try:
+            from .core import connect
+
+            db = connect(codex_home)
+            db.close()
+            ledger_writable = True
+        except Exception as exc:
+            ledger_error = str(exc)
+            warnings.append("Sentinel ledger is not writable from this environment: " + ledger_error)
     return {
         "version": VERSION,
         "ok": not issues,
@@ -654,15 +708,22 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
         "path_cli": path_cli,
         "path_cli_owned": path_cli_owned,
         "skills_target": skills_target,
+        "hooks_profile": hooks_profile,
+        "expected_hook_events": list(hook_events_for_profile(hooks_profile)),
+        "hooks_profile_matches": not missing_expected_hooks and not unexpected_hooks,
         "skill_status": skill_status,
         "skills_present": skills_present,
         "global_shim_bins": [str(path) for path in global_bins],
         "global_cli_links": global_cli_links,
         "hooks_json": str(hooks_path),
         "hooks_by_event": hooks_by_event,
-        "hooks_present": all(hooks_by_event.values()),
+        "hooks_present": not missing_expected_hooks,
+        "unexpected_hook_events": unexpected_hooks,
         "mcp_present": mcp_present,
         "hooks_feature_present": hooks_feature_present,
+        "ledger_writable": ledger_writable,
+        "ledger_error": ledger_error,
+        "performance_mode": config.get("performance_mode"),
         "auto_continue": config.get("auto_continue"),
         "retention_days": config.get("retention_days"),
         "redact": config.get("redact"),
@@ -675,8 +736,10 @@ def doctor_fix(*, codex_home: Path, global_bin: Path | None = None) -> dict[str,
     root = install_root(codex_home)
     if not root.exists():
         raise RuntimeError("runtime is missing; run `compaction-sentinel install` from a checkout or pipx/uvx install first")
-    merge_hooks(codex_home)
-    actions.append("merged hooks.json")
+    config = load_runtime_config(codex_home)
+    hooks_profile = normalize_hooks_profile(config.get("hooks_profile") or "balanced")
+    merge_hooks(codex_home, hooks_profile=hooks_profile)
+    actions.append(f"merged hooks.json for hooks_profile={hooks_profile}")
     merge_mcp_config(codex_home)
     actions.append("merged MCP config")
     ensure_hooks_feature(codex_home)
@@ -687,9 +750,12 @@ def doctor_fix(*, codex_home: Path, global_bin: Path | None = None) -> dict[str,
     install_public_link(public_bin / "compaction-sentinel", launcher)
     install_public_link(public_bin / "cs", launcher)
     actions.append("checked CLI links")
-    config = load_runtime_config(codex_home)
     if "skills_target" not in config:
         config["skills_target"] = "codex"
+    if "hooks_profile" not in config:
+        config["hooks_profile"] = hooks_profile
+    if "performance_mode" not in config:
+        config["performance_mode"] = hooks_profile
     repaired_skills = repair_skill_install(codex_home, config.get("skills_target"))
     actions.append(
         "checked skill copy"
@@ -714,6 +780,8 @@ def doctor_explanations(result: dict[str, Any]) -> list[str]:
         text = str(issue)
         if "hooks.json" in text:
             explanations.append("Hooks load the automatic resume packet; rerun install or `~/.codex/bin/cs doctor --fix`.")
+        elif "hooks_profile" in text:
+            explanations.append("The installed hook set does not match the selected hooks profile; `~/.codex/bin/cs doctor --fix` repairs it.")
         elif "MCP" in text or "mcp" in text:
             explanations.append("MCP tools let Codex explicitly save/search checkpoints; `~/.codex/bin/cs doctor --fix` rewrites the config block.")
         elif "runtime" in text:
@@ -741,6 +809,10 @@ def doctor_explanations(result: dict[str, Any]) -> list[str]:
             explanations.append("A previously opted-in global shim drifted; rerun `doctor --fix` to repair it or `uninstall` to remove it.")
         elif "skill copy" in text:
             explanations.append("The skill copy is missing or not Sentinel-owned. `doctor --fix` repairs missing copies without deleting unrelated user files.")
+        elif "hot hooks outside hooks_profile" in text:
+            explanations.append("Your hooks profile is light but older hot hooks are still installed. Run `~/.codex/bin/cs doctor --fix` to remove Sentinel-owned hot hooks.")
+        elif "ledger is not writable" in text:
+            explanations.append("The local SQLite ledger could not be opened for writes from this environment. This is often a sandbox/full-disk-access issue, not database corruption.")
         else:
             explanations.append(text)
     if not explanations:

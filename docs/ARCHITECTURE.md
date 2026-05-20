@@ -14,12 +14,14 @@ Hooks run at lifecycle boundaries:
 
 - `SessionStart`: inject latest packet.
 - `UserPromptSubmit`: record prompt, infer fresh goals, inject packet.
-- `PreToolUse`: record planned tool actions and warn on loops.
+- `PreToolUse`: record planned tool actions and warn on repeated command loops when the selected hooks profile includes hot hooks.
 - `PermissionRequest`: record approval context and repeated approval requests without deciding for the user.
-- `PostToolUse`: record outcomes and warn when a failed pattern repeats.
-- `Stop`: record turn end and optionally continue active work.
+- `PostToolUse`: record compact outcomes and warn when a failed pattern repeats when the selected hooks profile includes hot hooks.
+- `Stop`: record turn end, run full stop-time warning checks, and optionally continue active work.
 
 The hook CLI is fail-open: unexpected exceptions are logged and return `{}` so Codex work is not blocked by Sentinel.
+
+Hook profiles trade visibility for overhead. `full` and `balanced` install all hook events; `light` omits `PreToolUse` and `PostToolUse` while leaving startup, prompt, permission, Stop, skill, and MCP continuity in place. Runtime `performance_mode` controls how much work the installed hot hooks do.
 
 3. SQLite Ledger
 

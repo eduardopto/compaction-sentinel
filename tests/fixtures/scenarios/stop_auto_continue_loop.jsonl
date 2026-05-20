@@ -4,4 +4,4 @@
 {"event":"Stop","payload":{"cwd":"$PROJECT","session_id":"s1","turn_id":"t1","last_assistant_message":"Still working again."},"expect":{"last_output_empty":true}}
 {"assert":{"cwd":"$PROJECT","state_key_contains":["stop_continue:turn"],"state_key_not_contains":["$PROJECT"],"active_checkpoint_fields":{"objective":"Finish unattended verification"}}}
 {"scrub_project":{"cwd":"$PROJECT"}}
-{"assert":{"cwd":"$PROJECT","state_key_count":0,"db_event_count":0}}
+{"assert":{"cwd":"$PROJECT","state_key_absent_contains":["stop_continue","$PROJECT"],"db_event_count":0}}

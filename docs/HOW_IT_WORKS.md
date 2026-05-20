@@ -32,10 +32,10 @@ Plain `cs` is a shell convenience, not the install contract. The guaranteed comm
 | --- | --- |
 | `SessionStart` | Records the session start and injects the latest project packet |
 | `UserPromptSubmit` | Records the prompt, infers `set goal:` objectives, and injects the packet |
-| `PreToolUse` | Records intended tool use and warns on repeated command/investigation patterns |
+| `PreToolUse` | Records intended tool use and warns on repeated command patterns when the selected hooks profile includes hot hooks |
 | `PermissionRequest` | Records approval context and repeated approval requests; never auto-approves |
-| `PostToolUse` | Records tool result summaries and warns on repeated real failure loops |
-| `Stop` | Records the turn end; optionally continues active work when explicitly enabled |
+| `PostToolUse` | Records compact tool result summaries and warns on repeated real failure loops when the selected hooks profile includes hot hooks |
+| `Stop` | Records the turn end, runs the full stop-time warning check, and optionally continues active work when explicitly enabled |
 
 ## Packet V2
 
@@ -48,6 +48,18 @@ The packet is a ranked operating brief, not a raw log:
 - Do-not-repeat items and regression warnings.
 - Recent event trail only as supporting context.
 - Resume contract that tells Codex to continue the live task, not restart from the last user message.
+
+The default packet budget is intentionally moderate. Increase `max_packet_chars` for debugging, or lower it for very large sessions.
+
+## Performance Modes
+
+`performance_mode` controls how much work the runtime does on hot hooks:
+
+- `full`: maximum capture.
+- `balanced`: default; compact storage, throttled maintenance, and cheaper hot-hook warning checks.
+- `light`: keeps startup/prompt/Stop/MCP continuity and records only compact failure or test/build milestones if hot hooks are still installed.
+
+`hooks_profile light` goes further by removing `PreToolUse` and `PostToolUse` hook entries from the user-level hook install.
 
 ## Rich Checkpoints
 

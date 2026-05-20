@@ -1,6 +1,6 @@
 # Dogfood Results
 
-This is an internal dogfood report for the v0.4 Reliability Contract, v0.4.1 public-proof follow-up, v0.4.2 false-positive failure-detection hardening, v0.4.3 CLI discoverability hardening, and v0.4.4 install/MCP/packet reliability hardening. It is not an independent benchmark and it does not claim to control OpenAI server-side compaction. It measures whether Sentinel preserves the local continuity contract around Codex Desktop: objective, next action, evidence, loop warnings, redaction, and project resolution.
+This is an internal dogfood report for the v0.4 Reliability Contract, v0.4.1 public-proof follow-up, v0.4.2 false-positive failure-detection hardening, v0.4.3 CLI discoverability hardening, v0.4.4 install/MCP/packet reliability hardening, and v0.4.5 performance hardening. It is not an independent benchmark and it does not claim to control OpenAI server-side compaction. It measures whether Sentinel preserves the local continuity contract around Codex Desktop: objective, next action, evidence, loop warnings, redaction, project resolution, and hot-hook overhead.
 
 ## Real Project Surfaces
 

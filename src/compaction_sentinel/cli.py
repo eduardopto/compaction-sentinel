@@ -11,10 +11,13 @@ from typing import Any
 
 from . import install as installer
 from .core import (
+    DEFAULT_MAX_PACKET_CHARS,
+    PERFORMANCE_MODES,
     VERSION,
     active_checkpoint,
     append_checkpoint_field,
     build_resume_packet,
+    config_int,
     connect,
     default_codex_home,
     export_project,
@@ -58,6 +61,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop-hook continuation policy. Defaults to preserving the current setting, or off on first install.",
     )
     install.add_argument("--skills-target", choices=["codex", "agents", "both"], default="both", help="Where to copy the skill.")
+    install.add_argument(
+        "--hooks-profile",
+        choices=["full", "balanced", "light"],
+        default="balanced",
+        help="Hook install profile. light omits PreToolUse/PostToolUse hot hooks.",
+    )
     install.add_argument(
         "--global-bin",
         type=Path,
@@ -132,7 +141,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     packet = sub.add_parser("packet", help="Print the current resume packet for the current project.")
     packet.add_argument("--cwd", default=None)
-    packet.add_argument("--max-chars", type=int, default=9000)
+    packet.add_argument("--max-chars", type=int, default=None)
 
     status = sub.add_parser("status", help="Show runtime status for the current project.")
     status.add_argument("--cwd", default=None)
@@ -187,6 +196,20 @@ def parse_config_value(value: str) -> Any:
         return value
 
 
+def validate_config_update(key: str, value: Any) -> Any:
+    if key == "performance_mode":
+        mode = str(value).strip().lower()
+        if mode not in PERFORMANCE_MODES:
+            raise SystemExit("performance_mode must be one of: full, balanced, light")
+        return mode
+    if key == "hooks_profile":
+        profile = str(value).strip().lower()
+        if profile not in {"full", "balanced", "light"}:
+            raise SystemExit("hooks_profile must be one of: full, balanced, light")
+        return profile
+    return value
+
+
 def json_print(value: Any) -> None:
     print(json.dumps(value, indent=2, sort_keys=True))
 
@@ -213,6 +236,7 @@ def main(argv: list[str] | None = None) -> int:
             enable_stop_continue=args.enable_stop_continue,
             auto_continue=args.auto_continue,
             skills_target=args.skills_target,
+            hooks_profile=args.hooks_profile,
             global_bin=args.global_bin,
             dry_run=args.dry_run,
         )
@@ -334,8 +358,15 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "packet":
         db = connect(codex_home)
         project = project_from_cli(args.cwd)
+        config = load_runtime_config(codex_home)
+        max_chars = args.max_chars if args.max_chars is not None else config_int(
+            config,
+            "max_packet_chars",
+            DEFAULT_MAX_PACKET_CHARS,
+            minimum=500,
+        )
         try:
-            print(build_resume_packet(db, project, reason="cli", max_chars=args.max_chars))
+            print(build_resume_packet(db, project, reason="cli", max_chars=max_chars))
         finally:
             db.close()
         return 0
@@ -418,7 +449,10 @@ def main(argv: list[str] | None = None) -> int:
             json_print(config)
             return 0
         if args.config_command == "set":
-            config[str(args.key)] = parse_config_value(str(args.value))
+            config[str(args.key)] = validate_config_update(
+                str(args.key),
+                parse_config_value(str(args.value)),
+            )
             write_runtime_config(config, codex_home)
             json_print({"updated": args.key, "value": config[str(args.key)]})
             return 0
@@ -441,4 +475,8 @@ def main(argv: list[str] | None = None) -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        raise SystemExit(main())
+    except RuntimeError as exc:
+        print(f"compaction-sentinel: {exc}", file=sys.stderr)
+        raise SystemExit(1)

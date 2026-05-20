@@ -12,6 +12,8 @@ Look at:
 - `issues`
 - `warnings`
 - `hooks_by_event`
+- `hooks_profile`
+- `performance_mode`
 - `mcp_present`
 - `auto_continue`
 - `retention_days`
@@ -81,6 +83,46 @@ To make plain `cs` work globally without editing shell startup files, opt in:
 ```
 
 Sentinel records that global shim directory so `~/.codex/bin/cs uninstall` can remove the Sentinel-owned global links later.
+
+## Codex Feels Slow In Huge Sessions
+
+First check the current mode:
+
+```bash
+~/.codex/bin/cs config show
+~/.codex/bin/cs status --cwd "$PWD"
+```
+
+Try the lower-overhead runtime settings:
+
+```bash
+~/.codex/bin/cs config set max_packet_chars 4000
+~/.codex/bin/cs config set auto_continue off
+~/.codex/bin/cs config set performance_mode light
+~/.codex/bin/cs retention set --days 7
+```
+
+For the lightest hook install, remove hot tool hooks and keep startup, prompt, permission, Stop, skill, and MCP continuity:
+
+```bash
+~/.codex/bin/cs config set hooks_profile light
+~/.codex/bin/cs doctor --fix --explain
+```
+
+For an A/B test, uninstall without purging the ledger, restart Codex, compare for 20-30 minutes, then reinstall:
+
+```bash
+~/.codex/bin/cs uninstall
+python3 scripts/install.py --doctor
+```
+
+This is not proof that every slowdown is Sentinel. Huge Codex sessions can also slow down because of model context, project size, many tools, app rendering, and compaction itself.
+
+You can run the non-strict hook benchmark from a source checkout:
+
+```bash
+python scripts/benchmark_hooks.py
+```
 
 ## `codex mcp list` Does Not Show `compaction_sentinel`
 

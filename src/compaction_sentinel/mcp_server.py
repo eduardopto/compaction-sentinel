@@ -107,7 +107,7 @@ TOOLS = [
             "type": "object",
             "properties": {
                 "cwd": {"type": "string"},
-                "max_chars": {"type": "integer", "default": 9000},
+                "max_chars": {"type": "integer", "default": DEFAULT_MAX_PACKET_CHARS},
             },
             "required": ["cwd"],
         },

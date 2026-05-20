@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.5
+
+- Adds runtime `performance_mode` with `full`, default `balanced`, and `light` settings.
+- Adds install-time `--hooks-profile full|balanced|light`; the light profile omits hot `PreToolUse`/`PostToolUse` hooks while keeping startup, prompt, permission, Stop, skill, and MCP continuity.
+- Throttles retention cleanup with `retention_check_interval_seconds` and adds `created_at` indexes for events, notes, and checkpoints.
+- Throttles per-project pruning with `prune_check_interval_events` so normal event recording does not run COUNT/DELETE maintenance on every hook.
+- Makes hot-hook loop checks cheaper: PreToolUse uses same-fingerprint repeat checks, PostToolUse runs failure-loop scans only for failures or test/build commands, and tool-output blindness moves to Stop/full packet contexts.
+- Adds compact event storage controls for tool input, normal tool output, and read-only command output.
+- Adds clearer CLI failure text when the local SQLite ledger is not writable from the current environment.
+- Adds `scripts/benchmark_hooks.py` and a CI smoke run so hook overhead can be measured without making CI depend on timing thresholds.
+- Adds slow-session troubleshooting guidance and skill wording to batch evidence at milestones instead of checkpointing after routine reads.
+
 ## 0.4.4
 
 - Keeps completed and superseded checkpoints out of `<active_objective>` packets; they can appear only as clearly historical `<last_checkpoint>` context.

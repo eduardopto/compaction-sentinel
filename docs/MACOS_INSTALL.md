@@ -34,13 +34,34 @@ Package installs include the skill assets, so they do not require a source check
 ## What The Installer Writes
 
 - `~/.codex/compaction-sentinel/` runtime files and SQLite database.
-- `~/.codex/hooks.json` entries for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
+- `~/.codex/hooks.json` entries for the selected hook profile. The default `balanced` profile installs `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
 - `~/.codex/config.toml` MCP entry.
 - `~/.codex/skills/compaction-sentinel` skill copy when `--skills-target codex` or `both` is used.
 - `~/.agents/skills/compaction-sentinel` skill copy when `--skills-target agents` or `both` is used.
 - `~/.codex/bin/cs` and `~/.codex/bin/compaction-sentinel` shims when those names are available.
 
 The guaranteed CLI path is `~/.codex/bin/cs`. Plain `cs` only works if your shell PATH includes `~/.codex/bin` or if you opt in to a global shim.
+
+## Hook Profiles
+
+The default profile is `balanced`:
+
+```bash
+python3 scripts/install.py --doctor --hooks-profile balanced
+```
+
+Profiles:
+
+- `full`: installs all hook events and keeps maximum hot-hook capture.
+- `balanced`: installs all hook events but uses cheaper default runtime behavior.
+- `light`: installs only `SessionStart`, `UserPromptSubmit`, `PermissionRequest`, and `Stop`. MCP tools and the skill still work, but hot `PreToolUse`/`PostToolUse` loop checks are omitted.
+
+You can switch an installed profile with:
+
+```bash
+~/.codex/bin/cs config set hooks_profile light
+~/.codex/bin/cs doctor --fix --explain
+```
 
 Before changing `~/.codex/hooks.json` or `~/.codex/config.toml`, the installer writes backups under:
 
