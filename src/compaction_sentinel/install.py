@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import platform
+import re
 import shutil
 import shlex
 import sys
@@ -16,6 +17,7 @@ from .core import VERSION, install_root, load_runtime_config, write_runtime_conf
 
 
 HOOK_MARKER = "compaction-sentinel"
+SKILL_NAME = "compaction-sentinel"
 SUPPORTED_MACOS = "Darwin"
 MIN_PYTHON = (3, 11)
 HOOK_EVENTS = {
@@ -111,6 +113,7 @@ def install(
         if global_bin is not None:
             install_global_links(global_bin, launcher_path(codex_home))
             remember_global_bin(config, global_bin)
+        config["skills_target"] = normalize_skills_target(skills_target)
         if actual_auto_continue is not None:
             config["auto_continue"] = actual_auto_continue
         actual_auto_continue = str(config.get("auto_continue") or "off")
@@ -250,18 +253,72 @@ def sentinel_path_owned(path: str | None) -> bool:
     return public_link_points_to_sentinel(Path(path))
 
 
+def normalize_skills_target(target: Any) -> str:
+    value = str(target or "codex").strip().lower()
+    return value if value in {"codex", "agents", "both"} else "codex"
+
+
+def skill_target_paths(codex_home: Path, target: Any) -> dict[str, Path]:
+    normalized = normalize_skills_target(target)
+    paths: dict[str, Path] = {}
+    if normalized in {"codex", "both"}:
+        paths["codex"] = codex_home / "skills" / SKILL_NAME
+    if normalized in {"agents", "both"}:
+        paths["agents"] = Path.home() / ".agents" / "skills" / SKILL_NAME
+    return paths
+
+
+def skill_dir_owned(path: Path) -> bool:
+    if path.name != SKILL_NAME:
+        return False
+    skill_file = path / "SKILL.md"
+    if not skill_file.exists():
+        return False
+    try:
+        text = skill_file.read_text(encoding="utf-8")[:1200]
+    except Exception:
+        return False
+    has_name = bool(re.search(r"(?m)^name:\s*compaction-sentinel\s*$", text))
+    has_heading = "# Compaction Sentinel" in text
+    return has_name and has_heading
+
+
+def copy_skill(skill_src: Path, dst: Path) -> None:
+    if dst.exists():
+        if not skill_dir_owned(dst):
+            raise RuntimeError(f"skill directory exists but is not owned by Compaction Sentinel: {dst}")
+        shutil.rmtree(dst)
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(skill_src, dst)
+
+
+def runtime_skill_source(codex_home: Path) -> Path:
+    candidate = install_root(codex_home) / "runtime" / "compaction_sentinel" / "assets" / "skills" / SKILL_NAME
+    if (candidate / "SKILL.md").exists():
+        return candidate
+    packaged = package_dir() / "assets" / "skills" / SKILL_NAME
+    if (packaged / "SKILL.md").exists():
+        return packaged
+    raise FileNotFoundError("Compaction Sentinel skill assets are missing from the runtime.")
+
+
 def install_skill(source_root: Path, codex_home: Path, target: str) -> None:
     skill_src = skill_source(source_root)
-    targets: list[Path] = []
-    if target in {"codex", "both"}:
-        targets.append(codex_home / "skills" / "compaction-sentinel")
-    if target in {"agents", "both"}:
-        targets.append(Path.home() / ".agents" / "skills" / "compaction-sentinel")
-    for dst in targets:
-        if dst.exists():
-            shutil.rmtree(dst)
-        dst.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copytree(skill_src, dst)
+    for dst in skill_target_paths(codex_home, target).values():
+        copy_skill(skill_src, dst)
+
+
+def repair_skill_install(codex_home: Path, target: Any) -> list[str]:
+    skill_src = runtime_skill_source(codex_home)
+    repaired: list[str] = []
+    for label, dst in skill_target_paths(codex_home, target).items():
+        if skill_dir_owned(dst):
+            continue
+        if dst.exists() and not skill_dir_owned(dst):
+            continue
+        copy_skill(skill_src, dst)
+        repaired.append(label)
+    return repaired
 
 
 def sentinel_hook_group(codex_home: Path, event_name: str, timeout: int) -> dict[str, Any]:
@@ -331,26 +388,33 @@ def ensure_hooks_feature(codex_home: Path) -> None:
     config = codex_home / "config.toml"
     backup_file(config)
     text = config.read_text(encoding="utf-8") if config.exists() else ""
-    if "[features]" not in text:
-        atomic_write_text(config, text.rstrip() + "\n\n[features]\nhooks = true\n")
-        return
     lines = text.splitlines()
     out: list[str] = []
     in_features = False
+    saw_features = False
     saw_hooks = False
     for line in lines:
         stripped = line.strip()
-        if stripped.startswith("[") and stripped.endswith("]"):
+        table_match = re.match(r"^\[([A-Za-z0-9_.-]+)\]\s*(?:#.*)?$", stripped)
+        if table_match:
             if in_features and not saw_hooks:
                 out.append("hooks = true")
-            in_features = stripped == "[features]"
-        if in_features and stripped.startswith("hooks"):
+            table_name = table_match.group(1)
+            in_features = table_name == "features"
+            if in_features:
+                saw_features = True
+                saw_hooks = False
+        if in_features and re.match(r"^hooks\s*=", stripped):
             out.append("hooks = true")
             saw_hooks = True
             continue
         out.append(line)
     if in_features and not saw_hooks:
         out.append("hooks = true")
+    if not saw_features:
+        if out and out[-1].strip():
+            out.append("")
+        out.extend(["[features]", "hooks = true"])
     atomic_write_text(config, "\n".join(out).rstrip() + "\n")
 
 
@@ -475,6 +539,11 @@ def uninstall(*, codex_home: Path, purge: bool = False) -> dict[str, Any]:
             if public_link_points_to_sentinel(link):
                 link.unlink()
                 removed.append(f"global-cli:{link}")
+    skills_target = runtime_config.get("skills_target") or "codex"
+    for label, skill_dir in skill_target_paths(codex_home, skills_target).items():
+        if skill_dir_owned(skill_dir):
+            shutil.rmtree(skill_dir)
+            removed.append(f"skill:{label}")
     if configured_global_bins(runtime_config) and not purge and install_root(codex_home).exists():
         runtime_config["global_shim_bins"] = []
         write_runtime_config(runtime_config, codex_home)
@@ -525,6 +594,16 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
     path_cli = shutil.which("cs")
     path_cli_owned = sentinel_path_owned(path_cli)
     config = load_runtime_config(codex_home)
+    skills_target = normalize_skills_target(config.get("skills_target") or "codex")
+    skill_status = {
+        label: {
+            "path": str(path),
+            "exists": path.exists(),
+            "owned": skill_dir_owned(path),
+        }
+        for label, path in skill_target_paths(codex_home, skills_target).items()
+    }
+    skills_present = all(bool(item["owned"]) for item in skill_status.values()) if skill_status else False
     global_bins = configured_global_bins(config)
     global_cli_links = {
         str(bin_dir / name): public_link_points_to_sentinel(bin_dir / name)
@@ -551,6 +630,9 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
         warnings.append("plain `cs` is not discoverable on PATH; use ~/.codex/bin/cs or add ~/.codex/bin to PATH")
     if path_cli and not path_cli_owned:
         warnings.append(f"plain `cs` resolves to non-Sentinel command {path_cli}; use ~/.codex/bin/cs")
+    missing_skills = [item["path"] for item in skill_status.values() if not item["owned"]]
+    if missing_skills:
+        warnings.append("Compaction Sentinel skill copy is missing or not owned: " + ", ".join(missing_skills))
     missing_global_links = [path for path, owned in global_cli_links.items() if not owned]
     if missing_global_links:
         warnings.append("recorded global Sentinel shim is missing or not owned: " + ", ".join(missing_global_links))
@@ -571,6 +653,9 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
         "public_cli_owned": public_cli_owned,
         "path_cli": path_cli,
         "path_cli_owned": path_cli_owned,
+        "skills_target": skills_target,
+        "skill_status": skill_status,
+        "skills_present": skills_present,
         "global_shim_bins": [str(path) for path in global_bins],
         "global_cli_links": global_cli_links,
         "hooks_json": str(hooks_path),
@@ -603,13 +688,20 @@ def doctor_fix(*, codex_home: Path, global_bin: Path | None = None) -> dict[str,
     install_public_link(public_bin / "cs", launcher)
     actions.append("checked CLI links")
     config = load_runtime_config(codex_home)
+    if "skills_target" not in config:
+        config["skills_target"] = "codex"
+    repaired_skills = repair_skill_install(codex_home, config.get("skills_target"))
+    actions.append(
+        "checked skill copy"
+        + (f" ({', '.join(repaired_skills)})" if repaired_skills else "")
+    )
     if global_bin is not None:
         remember_global_bin(config, normalize_bin_dir(global_bin))
     global_bins = configured_global_bins(config)
     for bin_dir in global_bins:
         install_global_links(bin_dir, launcher)
         actions.append(f"checked global CLI links in {bin_dir}")
-    if global_bin is not None or global_bins:
+    if global_bin is not None or global_bins or repaired_skills or "skills_target" in config:
         write_runtime_config(config, codex_home)
     result = doctor(codex_home=codex_home)
     result["fix_actions"] = actions
@@ -628,6 +720,8 @@ def doctor_explanations(result: dict[str, Any]) -> list[str]:
             explanations.append("The runtime contains the hook scripts and local ledger code; reinstall from the package.")
         elif "hooks feature" in text:
             explanations.append("Codex must have `[features] hooks = true` for user-level hooks to run.")
+        elif "skill copy" in text:
+            explanations.append("The skill provides on-demand continuity instructions; `~/.codex/bin/cs doctor --fix` restores missing Sentinel-owned copies.")
         else:
             explanations.append(text)
     if not result.get("issues"):
@@ -645,6 +739,8 @@ def doctor_explanations(result: dict[str, Any]) -> list[str]:
             explanations.append("The guaranteed user-level CLI shim is missing; `doctor --fix` recreates it.")
         elif "recorded global Sentinel shim" in text:
             explanations.append("A previously opted-in global shim drifted; rerun `doctor --fix` to repair it or `uninstall` to remove it.")
+        elif "skill copy" in text:
+            explanations.append("The skill copy is missing or not Sentinel-owned. `doctor --fix` repairs missing copies without deleting unrelated user files.")
         else:
             explanations.append(text)
     if not explanations:

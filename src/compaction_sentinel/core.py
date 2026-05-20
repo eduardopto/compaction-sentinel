@@ -8,6 +8,7 @@ import json
 import os
 import platform
 import re
+import shlex
 import sqlite3
 import sys
 from dataclasses import dataclass
@@ -15,7 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "0.4.3"
+VERSION = "0.4.4"
 APP_NAME = "Compaction Sentinel"
 DEFAULT_MAX_PACKET_CHARS = 9000
 DEFAULT_LOOP_THRESHOLD = 3
@@ -111,6 +112,7 @@ def default_runtime_config() -> dict[str, Any]:
         "max_events_per_project": DEFAULT_MAX_EVENTS_PER_PROJECT,
         "retention_days": DEFAULT_RETENTION_DAYS,
         "redact": True,
+        "skills_target": "codex",
         "global_shim_bins": [],
     }
 
@@ -669,6 +671,56 @@ def normalized_outcome(outcome: str | None) -> str:
     return str(outcome or "").strip().lower()
 
 
+def shell_quote_join(parts: list[str]) -> str:
+    return " ".join(shlex.quote(part) for part in parts)
+
+
+def strip_env_prefix(parts: list[str]) -> list[str]:
+    remaining = list(parts)
+    while remaining:
+        token = remaining[0]
+        if token == "env":
+            remaining = remaining[1:]
+            continue
+        if re.match(r"^[A-Za-z_][A-Za-z0-9_]*=.*", token):
+            remaining = remaining[1:]
+            continue
+        break
+    return remaining
+
+
+def command_for_classification(command: str) -> str:
+    """Unwrap common shell/package runners before command-type detection."""
+    current = str(command or "").strip()
+    for _ in range(4):
+        try:
+            parts = shlex.split(current)
+        except ValueError:
+            return current
+        parts = strip_env_prefix(parts)
+        if not parts:
+            return current
+        runner = parts[0]
+        if runner in {"bash", "zsh", "sh"}:
+            replacement = ""
+            for index, token in enumerate(parts[1:], start=1):
+                if token == "-c" or (token.startswith("-") and "c" in token):
+                    if index + 1 < len(parts):
+                        replacement = parts[index + 1]
+                    break
+            if replacement and replacement != current:
+                current = replacement.strip()
+                continue
+            return current
+        if runner in {"uv", "poetry"} and len(parts) >= 3 and parts[1] == "run":
+            replacement = shell_quote_join(parts[2:]).strip()
+            if replacement and replacement != current:
+                current = replacement
+                continue
+        return current
+    return current
+
+
 def outcome_indicates_failure(outcome: str | None) -> bool:
     value = normalized_outcome(outcome)
     if not value or value in SUCCESS_OUTCOMES:
@@ -685,17 +737,17 @@ def outcome_indicates_success(outcome: str | None) -> bool:
 
 
 def is_read_only_command(command: str) -> bool:
-    return bool(READ_ONLY_COMMAND_RE.search(command or ""))
+    return bool(READ_ONLY_COMMAND_RE.search(command_for_classification(command)))
 
 
 def is_test_or_build_command(command: str) -> bool:
-    return bool(TEST_OR_BUILD_COMMAND_RE.search(command or ""))
+    return bool(TEST_OR_BUILD_COMMAND_RE.search(command_for_classification(command)))
 
 
 def read_only_response_failed(command: str, response: str) -> bool:
     if READ_ONLY_FAILURE_RE.search(response):
         return True
-    lowered = command.lower()
+    lowered = command_for_classification(command).lower()
     if re.search(r"^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*git\b", lowered):
         return bool(re.search(r"(?i)^\s*(fatal|error):\s+", response))
     if re.search(r"^\s*(?:env\s+)?(?:[A-Za-z_][A-Za-z0-9_]*=\S+\s+)*jq\b", lowered):
@@ -855,9 +907,9 @@ def infer_objective(prompt: str) -> str | None:
     if not prompt:
         return None
     patterns = [
-        r"(?is)\bset\s+goal\s*:\s*(.+)",
-        r"(?is)\bgoal\s*:\s*(.+)",
-        r"(?is)\bdo\s+not\s+stop\s+until\s+(.+)",
+        r"(?ims)^\s*set\s+goal\s*:\s*(.+)",
+        r"(?ims)^\s*goal\s*:\s*(.+)",
+        r"(?ims)^\s*do\s+not\s+stop\s+until\s+(.+)",
     ]
     for pattern in patterns:
         match = re.search(pattern, prompt)
@@ -1400,9 +1452,14 @@ def strongest_do_not_repeat_line(
     return trim_packet_text(" | ".join(items), limit)
 
 
+def is_active_checkpoint_row(checkpoint: sqlite3.Row | None) -> bool:
+    return bool(checkpoint and checkpoint["status"] in {"active", "blocked"})
+
+
 def priority_resume_packet(
     *,
     checkpoint: sqlite3.Row | None,
+    last_checkpoint: sqlite3.Row | None = None,
     warnings: list[str],
     reason: str,
     max_chars: int,
@@ -1423,13 +1480,25 @@ def priority_resume_packet(
     lines = [
         f'<compaction-sentinel version="{VERSION}" schema="packet-v2" reason="{trim_packet_text(reason, 32)}">',
         f"<active_objective>{objective}</active_objective>",
-        f"<next_action>{next_action}</next_action>",
-        f"<blockers>- {blocker}</blockers>",
-        f"<evidence>- {evidence}</evidence>",
-        f"<do_not_repeat>- {avoid}</do_not_repeat>",
-        "<resume_contract>Continue live objective; do not restart; verify latest output before completion.</resume_contract>",
-        "</compaction-sentinel>",
     ]
+    if not checkpoint and last_checkpoint:
+        lines.append(
+            "<last_checkpoint>"
+            "historical only; "
+            f"status: {trim_packet_text(last_checkpoint['status'], 16)}; "
+            f"objective: {trim_packet_text(last_checkpoint['objective'], 72)}"
+            "</last_checkpoint>"
+        )
+    lines.extend(
+        [
+            f"<next_action>{next_action}</next_action>",
+            f"<blockers>- {blocker}</blockers>",
+            f"<evidence>- {evidence}</evidence>",
+            f"<do_not_repeat>- {avoid}</do_not_repeat>",
+            "<resume_contract>Continue live objective; do not restart; verify latest output before completion.</resume_contract>",
+            "</compaction-sentinel>",
+        ]
+    )
     packet = "\n".join(lines)
     if len(packet) <= max_chars:
         return packet
@@ -1442,13 +1511,25 @@ def priority_resume_packet(
         lines = [
             f'<compaction-sentinel version="{VERSION}" schema="packet-v2" reason="{trim_packet_text(reason, 20)}">',
             f"<active_objective>{objective}</active_objective>",
-            f"<next_action>{trim_packet_text(next_action, limit)}</next_action>",
-            f"<blockers>- {strongest_blocker_line(checkpoint, limit=limit)}</blockers>",
-            f"<evidence>- {strongest_evidence_line(checkpoint, limit=limit)}</evidence>",
-            f"<do_not_repeat>- {strongest_do_not_repeat_line(checkpoint, warnings, limit=limit)}</do_not_repeat>",
-            "<resume_contract>Continue live work; do not restart; verify before completion.</resume_contract>",
-            "</compaction-sentinel>",
         ]
+        if not checkpoint and last_checkpoint:
+            lines.append(
+                "<last_checkpoint>"
+                "historical only; "
+                f"status: {trim_packet_text(last_checkpoint['status'], 10)}; "
+                f"objective: {trim_packet_text(last_checkpoint['objective'], limit)}"
+                "</last_checkpoint>"
+            )
+        lines.extend(
+            [
+                f"<next_action>{trim_packet_text(next_action, limit)}</next_action>",
+                f"<blockers>- {strongest_blocker_line(checkpoint, limit=limit)}</blockers>",
+                f"<evidence>- {strongest_evidence_line(checkpoint, limit=limit)}</evidence>",
+                f"<do_not_repeat>- {strongest_do_not_repeat_line(checkpoint, warnings, limit=limit)}</do_not_repeat>",
+                "<resume_contract>Continue live work; do not restart; verify before completion.</resume_contract>",
+                "</compaction-sentinel>",
+            ]
+        )
         packet = "\n".join(lines)
         if len(packet) <= max_chars:
             return packet
@@ -1463,7 +1544,9 @@ def build_resume_packet(
     max_chars: int = DEFAULT_MAX_PACKET_CHARS,
     loop_threshold: int = DEFAULT_LOOP_THRESHOLD,
 ) -> str:
-    checkpoint = active_checkpoint(db, project) or latest_checkpoint(db, project)
+    checkpoint = active_checkpoint(db, project)
+    latest = latest_checkpoint(db, project)
+    last_checkpoint = latest if not checkpoint and not is_active_checkpoint_row(latest) else None
     events = recent_events(db, project)
     notes = recent_notes(db, project)
     warnings = loop_warnings(db, project, threshold=loop_threshold)
@@ -1555,6 +1638,29 @@ def build_resume_packet(
             ]
         )
 
+    if last_checkpoint:
+        lines.extend(
+            [
+                "",
+                "<last_checkpoint>",
+                f"status: {escape_packet_text(last_checkpoint['status'])}",
+                f"objective: {escape_packet_text(last_checkpoint['objective'])}",
+                f"completed_at: {escape_packet_text(last_checkpoint['completed_at'] or last_checkpoint['updated_at'])}",
+            ]
+        )
+        current_step = first_packet_line(last_checkpoint["current_step"], fallback="", limit=500)
+        if current_step:
+            lines.append(f"current_step: {current_step}")
+        evidence = first_packet_line(
+            last_checkpoint["tests_passed"] or last_checkpoint["evidence"],
+            fallback="",
+            limit=500,
+        )
+        if evidence:
+            lines.append(f"evidence: {evidence}")
+        lines.append("note: historical context only; no active checkpoint is currently recorded.")
+        lines.append("</last_checkpoint>")
+
     if warnings or (checkpoint and checkpoint["do_not_repeat"]):
         lines.append("")
         lines.append("<do_not_repeat>")
@@ -1600,6 +1706,7 @@ def build_resume_packet(
     if max_chars <= 2500:
         return priority_resume_packet(
             checkpoint=checkpoint,
+            last_checkpoint=last_checkpoint,
             warnings=warnings,
             reason=reason,
             max_chars=max_chars,

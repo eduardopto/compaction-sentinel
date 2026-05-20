@@ -31,7 +31,7 @@ With Sentinel:
 Example packet excerpt:
 
 ```xml
-<compaction-sentinel version="0.4.3" schema="packet-v2" reason="session-start">
+<compaction-sentinel version="0.4.4" schema="packet-v2" reason="session-start">
   <active_objective>
   status: active
   objective: Finish auth repair and device verification
@@ -55,6 +55,8 @@ Example packet excerpt:
 - CLI commands for checkpoints, evidence, avoid-list items, scrub/export, retention, config, backups, doctor repair, and uninstall.
 - Replay evals for stale restarts, repeated failures, false-positive doc/source reads, objective changes, tool-output blindness, redaction, project switching, and Stop continuation loops.
 - Secret redaction for OpenAI keys, GitHub PATs, AWS keys, Google API keys, Slack tokens, JWTs, private keys, bearer tokens, env-style secrets, and high-entropy values.
+- Completed or superseded checkpoints are kept as historical context only; they are never presented as the active objective.
+- Doctor and uninstall treat Sentinel-owned skill copies as install artifacts, while preserving unrelated user skill directories.
 - Fail-open hooks. If Sentinel crashes, Codex work continues.
 
 ## Dogfood Results
@@ -195,6 +197,7 @@ Recommended install is still the user-level installer. Current Codex releases lo
 - Hook coverage is a continuity guardrail, not a security boundary for every possible tool path.
 - Codex Desktop may need a restart, and sometimes hook trust approval, before newly installed hooks are active.
 - Redaction is best effort. Do not paste secrets into Codex prompts if you can avoid it.
+- Doctor can repair missing Sentinel-owned skill copies when the installed runtime assets are present. If a user has replaced the skill directory with unrelated content, Sentinel preserves it and reports the mismatch instead of deleting it.
 - Auto-continue is off by default because forced continuation can be risky in destructive or ambiguous tasks.
 - Dogfood results are internal and replay-backed, not an independent third-party benchmark.
 

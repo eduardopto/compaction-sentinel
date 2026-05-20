@@ -8,11 +8,15 @@ from pathlib import Path
 from typing import Any
 
 from .core import (
+    DEFAULT_LOOP_THRESHOLD,
+    DEFAULT_MAX_PACKET_CHARS,
     VERSION,
     active_checkpoint,
     append_checkpoint_field,
     build_resume_packet,
+    config_int,
     connect,
+    load_runtime_config,
     project_from_cli,
     recent_events,
     save_checkpoint,
@@ -146,6 +150,20 @@ def error(req_id: Any, code: int, message: str) -> dict[str, Any]:
     return {"jsonrpc": "2.0", "id": req_id, "error": {"code": code, "message": message}}
 
 
+def arg_int(args: dict[str, Any], key: str, default: int, *, minimum: int | None = None) -> int:
+    raw = args.get(key)
+    if raw in (None, ""):
+        value = default
+    else:
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            value = default
+    if minimum is not None and value < minimum:
+        return minimum
+    return value
+
+
 def handle_initialize(req: dict[str, Any]) -> None:
     send(
         {
@@ -168,6 +186,8 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
     if not cwd.strip():
         send(error(req.get("id"), -32602, "cwd is required for all Compaction Sentinel MCP tools. Pass the active project working directory."))
         return
+    config = load_runtime_config(codex_home)
+    redact = bool(config.get("redact", True))
     db = connect(codex_home)
     project = project_from_cli(cwd)
     try:
@@ -192,6 +212,7 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
                 last_verified_at=str(args.get("last_verified_at") or ""),
                 confidence=str(args.get("confidence") or ""),
                 source="mcp",
+                redact=redact,
             )
             send(result(req.get("id"), f"Saved Compaction Sentinel checkpoint #{checkpoint_id} for {project.name}."))
             return
@@ -202,6 +223,7 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
                 field=str(args.get("kind") or "evidence"),
                 value=str(args.get("content") or ""),
                 objective=str(args.get("objective") or "") or None,
+                redact=redact,
             )
             send(result(req.get("id"), f"Updated Compaction Sentinel checkpoint #{checkpoint_id} for {project.name}."))
             return
@@ -212,6 +234,7 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
                 field="do_not_repeat",
                 value=str(args.get("content") or ""),
                 objective=str(args.get("objective") or "") or None,
+                redact=redact,
             )
             send(result(req.get("id"), f"Updated Compaction Sentinel checkpoint #{checkpoint_id} for {project.name}."))
             return
@@ -221,6 +244,7 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
                 project,
                 str(args.get("content") or ""),
                 surface_condition=str(args.get("surface_condition") or ""),
+                redact=redact,
             )
             send(result(req.get("id"), f"Saved Compaction Sentinel note #{note_id} for {project.name}."))
             return
@@ -232,13 +256,19 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
                         db,
                         project,
                         reason="mcp",
-                        max_chars=int(args.get("max_chars") or 9000),
+                        max_chars=arg_int(
+                            args,
+                            "max_chars",
+                            config_int(config, "max_packet_chars", DEFAULT_MAX_PACKET_CHARS, minimum=500),
+                            minimum=500,
+                        ),
+                        loop_threshold=config_int(config, "loop_threshold", DEFAULT_LOOP_THRESHOLD, minimum=1),
                     ),
                 )
             )
             return
         if name == "compaction_search":
-            rows = search_events(db, project, str(args.get("query") or ""), limit=int(args.get("limit") or 8))
+            rows = search_events(db, project, str(args.get("query") or ""), limit=arg_int(args, "limit", 8, minimum=1))
             text = "\n".join(
                 f"[{row['id']}] {row['created_at']} {row['event_name']}/{row['kind']}: {row['summary']}"
                 for row in rows

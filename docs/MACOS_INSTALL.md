@@ -36,8 +36,8 @@ Package installs include the skill assets, so they do not require a source check
 - `~/.codex/compaction-sentinel/` runtime files and SQLite database.
 - `~/.codex/hooks.json` entries for `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
 - `~/.codex/config.toml` MCP entry.
-- `~/.codex/skills/compaction-sentinel` skill copy.
-- `~/.agents/skills/compaction-sentinel` skill copy.
+- `~/.codex/skills/compaction-sentinel` skill copy when `--skills-target codex` or `both` is used.
+- `~/.agents/skills/compaction-sentinel` skill copy when `--skills-target agents` or `both` is used.
 - `~/.codex/bin/cs` and `~/.codex/bin/compaction-sentinel` shims when those names are available.
 
 The guaranteed CLI path is `~/.codex/bin/cs`. Plain `cs` only works if your shell PATH includes `~/.codex/bin` or if you opt in to a global shim.
@@ -67,7 +67,7 @@ You should see `compaction_sentinel` in the MCP list and `doctor` should return 
 ~/.codex/bin/cs doctor --fix --explain
 ```
 
-This repairs missing hook entries, the MCP block, the hooks feature flag, and Sentinel-owned CLI links. It does not erase your ledger.
+This repairs missing hook entries, the MCP block, the hooks feature flag, the configured Sentinel-owned skill copy, and Sentinel-owned CLI links. It does not erase your ledger.
 
 ## Optional Global CLI Shims
 
@@ -121,3 +121,5 @@ To remove the local runtime and ledger too:
 ```bash
 ~/.codex/bin/cs uninstall --purge
 ```
+
+Uninstall also removes Sentinel-owned skill copies. If a skill directory exists with unexpected non-Sentinel content, it is preserved and reported by `doctor` instead of being deleted.

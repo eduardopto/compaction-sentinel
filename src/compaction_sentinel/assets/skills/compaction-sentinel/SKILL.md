@@ -22,6 +22,7 @@ When Compaction Sentinel is installed, hooks should already inject a resume pack
 9. After tests, builds, installs, or other meaningful tool results, call `compaction_evidence_add` with the exact `cwd` and a compact evidence note.
 10. After a repeated failed route or ruled-out hypothesis, call `compaction_avoid_add` with the exact `cwd`.
 11. Before claiming completion, verify the user's acceptance criteria and the latest tool output. Do not claim completion from a checkpoint alone.
+12. When this skill is invoked for a long-running task and no active checkpoint exists, immediately call `compaction_checkpoint` with `cwd`, objective, acceptance criteria if available, current step, next action, and confidence before doing extended work.
 
 ## MCP Tools
 

@@ -3,11 +3,20 @@ from __future__ import annotations
 import json
 import sys
 import tempfile
+import tomllib
 import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from compaction_sentinel.install import doctor, doctor_explanations, doctor_fix, install, remove_toml_table, uninstall
+from compaction_sentinel.install import (
+    doctor,
+    doctor_explanations,
+    doctor_fix,
+    ensure_hooks_feature,
+    install,
+    remove_toml_table,
+    uninstall,
+)
 
 
 class InstallTests(unittest.TestCase):
@@ -225,6 +234,124 @@ class InstallTests(unittest.TestCase):
             result = uninstall(codex_home=home, purge=True)
             self.assertIn("runtime-and-ledger", result["removed"])
             self.assertFalse((home / "compaction-sentinel").exists())
+
+    def test_uninstall_removes_codex_skill_copy(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            install(source_root=source_root, codex_home=home, skills_target="codex")
+            skill_dir = home / "skills" / "compaction-sentinel"
+            self.assertTrue(skill_dir.exists())
+            result = uninstall(codex_home=home)
+            self.assertIn("skill:codex", result["removed"])
+            self.assertFalse(skill_dir.exists())
+
+    def test_uninstall_removes_both_skill_copies(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            fake_home = Path(tmp) / "home"
+            with patch("compaction_sentinel.install.Path.home", return_value=fake_home):
+                install(source_root=source_root, codex_home=home, skills_target="both")
+                codex_skill = home / "skills" / "compaction-sentinel"
+                agents_skill = fake_home / ".agents" / "skills" / "compaction-sentinel"
+                self.assertTrue(codex_skill.exists())
+                self.assertTrue(agents_skill.exists())
+                result = uninstall(codex_home=home)
+            self.assertIn("skill:codex", result["removed"])
+            self.assertIn("skill:agents", result["removed"])
+            self.assertFalse(codex_skill.exists())
+            self.assertFalse(agents_skill.exists())
+
+    def test_codex_target_uninstall_does_not_remove_agents_skill(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            fake_home = Path(tmp) / "home"
+            with patch("compaction_sentinel.install.Path.home", return_value=fake_home):
+                install(source_root=source_root, codex_home=home, skills_target="both")
+                agents_skill = fake_home / ".agents" / "skills" / "compaction-sentinel"
+                self.assertTrue(agents_skill.exists())
+                other_home = Path(tmp) / "other-codex"
+                install(source_root=source_root, codex_home=other_home, skills_target="codex")
+                result = uninstall(codex_home=other_home)
+            self.assertIn("skill:codex", result["removed"])
+            self.assertNotIn("skill:agents", result["removed"])
+            self.assertTrue(agents_skill.exists())
+
+    def test_uninstall_preserves_non_sentinel_skill_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            skill_dir = home / "skills" / "compaction-sentinel"
+            skill_dir.mkdir(parents=True)
+            (skill_dir / "SKILL.md").write_text("---\nname: custom\n---\n# Custom\n", encoding="utf-8")
+            result = uninstall(codex_home=home, purge=True)
+            self.assertNotIn("skill:codex", result["removed"])
+            self.assertTrue(skill_dir.exists())
+
+    def test_doctor_reports_and_fixes_missing_skill_copy(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            install(source_root=source_root, codex_home=home, skills_target="codex")
+            skill_dir = home / "skills" / "compaction-sentinel"
+            self.assertTrue(skill_dir.exists())
+            import shutil
+
+            shutil.rmtree(skill_dir)
+            status = doctor(codex_home=home)
+            self.assertFalse(status["skills_present"])
+            self.assertTrue(any("skill copy" in item for item in status["warnings"]))
+            explanations = doctor_explanations(status)
+            self.assertTrue(any("doctor --fix" in item for item in explanations))
+            fixed = doctor_fix(codex_home=home)
+            self.assertTrue(skill_dir.exists())
+            self.assertTrue(fixed["skills_present"])
+            self.assertTrue(any("checked skill copy" in item for item in fixed["fix_actions"]))
+
+    def test_ensure_hooks_feature_exact_table_and_key_handling(self) -> None:
+        cases = [
+            (
+                "# [features]\n# hooks = true\n",
+                ["# [features]", "[features]", "hooks = true"],
+                [],
+            ),
+            (
+                "[features.extra]\nvalue = true\n",
+                ["[features.extra]", "[features]", "hooks = true"],
+                [],
+            ),
+            (
+                "[features]\nhooks_extra = false\nplugin_hooks = false\n",
+                ["hooks_extra = false", "plugin_hooks = false", "hooks = true"],
+                [],
+            ),
+            (
+                "[features]\nhooks = false\nplugin_hooks = true\n",
+                ["hooks = true", "plugin_hooks = true"],
+                ["hooks = false"],
+            ),
+            (
+                "[features]\nhooks = true\n",
+                ["hooks = true"],
+                [],
+            ),
+        ]
+        for original, expected, unexpected in cases:
+            with self.subTest(original=original):
+                with tempfile.TemporaryDirectory() as tmp:
+                    home = Path(tmp) / "codex"
+                    home.mkdir()
+                    config = home / "config.toml"
+                    config.write_text(original, encoding="utf-8")
+                    ensure_hooks_feature(home)
+                    text = config.read_text(encoding="utf-8")
+                    parsed = tomllib.loads(text)
+                    self.assertTrue(parsed["features"]["hooks"])
+                    for item in expected:
+                        self.assertIn(item, text)
+                    for item in unexpected:
+                        self.assertNotIn(item, text)
 
     def test_skill_cli_fallback_uses_guaranteed_codex_bin_path(self) -> None:
         root = Path(__file__).resolve().parents[1]

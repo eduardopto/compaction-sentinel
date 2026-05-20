@@ -71,7 +71,7 @@ def build_parser() -> argparse.ArgumentParser:
     uninstall.add_argument("--purge", action="store_true", help="Also remove the local runtime and ledger.")
 
     doctor = sub.add_parser("doctor", help="Print install and runtime status.")
-    doctor.add_argument("--fix", action="store_true", help="Repair missing hooks, MCP config, hook feature, and CLI links.")
+    doctor.add_argument("--fix", action="store_true", help="Repair missing hooks, MCP config, hook feature, skill copy, and CLI links.")
     doctor.add_argument(
         "--global-bin",
         type=Path,

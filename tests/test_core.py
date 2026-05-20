@@ -13,6 +13,7 @@ from compaction_sentinel.core import (
     event_category,
     get_state,
     handle_hook,
+    infer_objective,
     is_failure_summary,
     looks_complete,
     project_from_payload,
@@ -165,6 +166,62 @@ class CoreTests(unittest.TestCase):
             save_checkpoint(db, payload_project, objective="Ship the thing", status="complete")
             self.assertIsNone(active_checkpoint(db, payload_project))
             db.close()
+
+    def test_completed_checkpoint_is_historical_not_active_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            config_path = home / "compaction-sentinel" / "config.json"
+            config_path.parent.mkdir(parents=True)
+            config_path.write_text(
+                json.dumps({"auto_continue": "gentle", "stop_continue_max_per_turn": 1}),
+                encoding="utf-8",
+            )
+            payload_project = project_from_payload({"cwd": str(project)})
+            db = connect(home)
+            try:
+                save_checkpoint(
+                    db,
+                    payload_project,
+                    objective="Ship completed work",
+                    current_step="Implemented the completed work.",
+                    next_action="Run stale completed next action",
+                    evidence="Completed proof passed.",
+                )
+                save_checkpoint(
+                    db,
+                    payload_project,
+                    objective="Ship completed work",
+                    status="complete",
+                    current_step="Completed work was verified.",
+                    next_action="Run stale completed next action",
+                    evidence="Final verification passed.",
+                )
+                packet = build_resume_packet(db, payload_project)
+                tiny_packet = build_resume_packet(db, payload_project, max_chars=1000)
+            finally:
+                db.close()
+            self.assertIn("<active_objective>\nstatus: none", packet)
+            self.assertIn("<last_checkpoint>", packet)
+            self.assertIn("historical context only", packet)
+            self.assertIn("Ship completed work", packet)
+            self.assertNotIn("<next_action>\nRun stale completed next action", packet)
+            self.assertNotIn("Run stale completed next action", packet)
+            self.assertIn("status: none", tiny_packet)
+            self.assertIn("<last_checkpoint>", tiny_packet)
+            out = handle_hook(
+                "Stop",
+                {
+                    "cwd": str(project),
+                    "session_id": "s1",
+                    "turn_id": "t1",
+                    "last_assistant_message": "Still working.",
+                },
+                codex_home=home,
+            )
+            self.assertEqual(out, {})
 
     def test_stop_hook_noop_returns_empty_json(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -383,6 +440,18 @@ class CoreTests(unittest.TestCase):
             )
             self.assertEqual(out.get("decision"), "block")
 
+    def test_goal_inference_ignores_quoted_examples(self) -> None:
+        prompt = (
+            "Please audit this project.\n\n"
+            "Add a replay fixture or unit test that simulates a normal long task without \"set goal:\" "
+            "and verifies an explicit MCP checkpoint."
+        )
+        self.assertIsNone(infer_objective(prompt))
+        self.assertEqual(
+            infer_objective("Goal:\nHarden the release without rewriting architecture."),
+            "Harden the release without rewriting architecture.",
+        )
+
     def test_reading_docs_with_failure_words_is_not_tool_failure(self) -> None:
         summary = (
             "Bash: sed -n '1,120p' docs/guard.md -> "
@@ -484,6 +553,36 @@ class CoreTests(unittest.TestCase):
                 )
             text = json.dumps(out)
             self.assertIn("Same failure loop", text)
+
+    def test_shell_wrappers_preserve_failure_classification(self) -> None:
+        doc_response = "This file mentions error: fatal, traceback, exception, and failed as documentation text."
+        read_commands = [
+            "bash -lc \"sed -n '1,120p' docs/guard.md\"",
+            "zsh -lc \"sed -n '1,120p' docs/guard.md\"",
+        ]
+        for command in read_commands:
+            with self.subTest(command=command):
+                summary = f"Bash: {command} -> {doc_response}"
+                self.assertFalse(is_failure_summary(summary))
+                self.assertEqual(event_category("PostToolUse", "tool-result:Bash", summary), "tool_result")
+
+        failing = [
+            'bash -lc "pytest tests/test_app.py" -> FAILED tests/test_app.py::test_save - AssertionError',
+            "uv run pytest tests/test_app.py -> FAILED tests/test_app.py::test_save - AssertionError",
+            "python -m pytest tests/test_app.py -> Traceback (most recent call last): AssertionError",
+        ]
+        for tail in failing:
+            with self.subTest(tail=tail):
+                summary = f"Bash: {tail}"
+                self.assertTrue(is_failure_summary(summary))
+                self.assertEqual(event_category("PostToolUse", "tool-result:Bash", summary), "tool_failure")
+
+        success = "Bash: poetry run pytest tests/test_app.py -> 61 passed, 0 failed"
+        self.assertFalse(is_failure_summary(success))
+        self.assertIn(
+            event_category("PostToolUse", "tool-result:Bash", success),
+            {"tool_success", "tool_result"},
+        )
 
     def test_tiny_packet_budgets_preserve_priority_fields(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

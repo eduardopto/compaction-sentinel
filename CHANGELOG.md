@@ -1,5 +1,17 @@
 # Changelog
 
+## 0.4.4
+
+- Keeps completed and superseded checkpoints out of `<active_objective>` packets; they can appear only as clearly historical `<last_checkpoint>` context.
+- Makes goal inference more conservative so quoted examples like `"set goal:"` inside long prompts do not create bogus active checkpoints.
+- Removes Sentinel-owned skill copies during uninstall and preserves non-Sentinel directories with unexpected skill content.
+- Extends `doctor` and `doctor --fix` to report and repair missing Sentinel skill copies from installed runtime assets.
+- Makes the MCP server honor runtime redaction, packet budget, and loop-threshold settings, with safe parsing for malformed MCP integer arguments.
+- Replaces hooks-feature config mutation with exact table/key handling so commented `[features]`, `hooks_extra`, and `plugin_hooks` are not corrupted.
+- Adds shell-wrapper failure detection coverage for `bash -lc`, `zsh -lc`, `uv run`, `poetry run`, and `python -m pytest`.
+- Adds plugin-shape validation tests for `.codex-plugin/plugin.json`, `.mcp.json`, and `hooks/hooks.json`.
+- Updates the skill instructions for explicit MCP checkpoint creation when a long-running task starts with no active checkpoint.
+
 ## 0.4.3
 
 - Updates the installed skill to use the guaranteed `~/.codex/bin/cs` path instead of plain `cs`, so agents do not conclude Sentinel is missing when a shell PATH omits `~/.codex/bin`.

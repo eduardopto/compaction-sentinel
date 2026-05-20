@@ -77,6 +77,163 @@ class McpTests(unittest.TestCase):
             self.assertIn("Saved Compaction Sentinel checkpoint", responses[1]["result"]["content"][0]["text"])
             self.assertIn("MCP cwd contract", responses[2]["result"]["content"][0]["text"])
 
+    def test_mcp_checkpoint_honors_redaction_config(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            config = home / "compaction-sentinel" / "config.json"
+            config.parent.mkdir(parents=True)
+            config.write_text(json.dumps({"redact": True}), encoding="utf-8")
+            secret = "OPENAI_API_KEY=sk-proj-abcdefghijklmnopqrstuvwxyz1234567890"
+            responses = self.run_mcp(
+                home,
+                [
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "compaction_checkpoint",
+                            "arguments": {"cwd": str(project), "objective": secret},
+                        },
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {"name": "compaction_status", "arguments": {"cwd": str(project)}},
+                    },
+                ],
+            )
+            status_text = responses[1]["result"]["content"][0]["text"]
+            self.assertIn("[redacted]", status_text)
+            self.assertNotIn("abcdefghijklmnopqrstuvwxyz", status_text)
+
+    def test_mcp_checkpoint_can_preserve_text_when_redaction_disabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            config = home / "compaction-sentinel" / "config.json"
+            config.parent.mkdir(parents=True)
+            config.write_text(json.dumps({"redact": False}), encoding="utf-8")
+            text = "Preserve non-secret acceptance detail for MCP redaction disabled mode"
+            responses = self.run_mcp(
+                home,
+                [
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "compaction_checkpoint",
+                            "arguments": {"cwd": str(project), "objective": text},
+                        },
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {"name": "compaction_status", "arguments": {"cwd": str(project)}},
+                    },
+                ],
+            )
+            self.assertIn(text, responses[1]["result"]["content"][0]["text"])
+
+    def test_mcp_packet_uses_runtime_limits_and_safe_argument_parsing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            config = home / "compaction-sentinel" / "config.json"
+            config.parent.mkdir(parents=True)
+            config.write_text(
+                json.dumps({"max_packet_chars": 700, "loop_threshold": "bad"}),
+                encoding="utf-8",
+            )
+            responses = self.run_mcp(
+                home,
+                [
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "compaction_checkpoint",
+                            "arguments": {
+                                "cwd": str(project),
+                                "objective": "MCP packet budget objective " + ("details " * 80),
+                                "next_action": "Keep this packet under the configured budget.",
+                            },
+                        },
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "compaction_packet",
+                            "arguments": {"cwd": str(project), "max_chars": "not-an-int"},
+                        },
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "compaction_search",
+                            "arguments": {"cwd": str(project), "query": "missing", "limit": "bad"},
+                        },
+                    },
+                ],
+            )
+            packet = responses[1]["result"]["content"][0]["text"]
+            self.assertLessEqual(len(packet), 700)
+            self.assertIn("MCP packet budget objective", packet)
+            self.assertIn("No matching Compaction Sentinel events", responses[2]["result"]["content"][0]["text"])
+
+    def test_explicit_mcp_checkpoint_for_normal_long_task_builds_packet(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            responses = self.run_mcp(
+                home,
+                [
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "compaction_checkpoint",
+                            "arguments": {
+                                "cwd": str(project),
+                                "objective": "Normal long task checkpoint",
+                                "acceptance_criteria": "Do the requested reliability pass.",
+                                "current_step": "Checkpoint created from explicit MCP call.",
+                                "next_action": "Run the reliability test suite.",
+                                "confidence": "medium",
+                            },
+                        },
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {"name": "compaction_packet", "arguments": {"cwd": str(project)}},
+                    },
+                ],
+            )
+            packet = responses[1]["result"]["content"][0]["text"]
+            self.assertIn("Normal long task checkpoint", packet)
+            self.assertIn("Do the requested reliability pass", packet)
+            self.assertIn("Run the reliability test suite", packet)
+
 
 if __name__ == "__main__":
     unittest.main()

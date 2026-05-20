@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "compaction-sentinel"
-version = "0.4.3"
+version = "0.4.4"
 description = "Codex Desktop continuity hooks, skill, and MCP tools that preserve active work across compaction."
 readme = "README.md"
 requires-python = ">=3.11"
