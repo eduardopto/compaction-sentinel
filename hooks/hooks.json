@@ -24,6 +24,32 @@
         ]
       }
     ],
+    "PreCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONPATH=${PLUGIN_ROOT}/src python3 -m compaction_sentinel.cli hook PreCompact",
+            "timeout": 10,
+            "statusMessage": "compaction-sentinel: PreCompact"
+          }
+        ]
+      }
+    ],
+    "PostCompact": [
+      {
+        "matcher": "manual|auto",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "PYTHONPATH=${PLUGIN_ROOT}/src python3 -m compaction_sentinel.cli hook PostCompact",
+            "timeout": 10,
+            "statusMessage": "compaction-sentinel: PostCompact"
+          }
+        ]
+      }
+    ],
     "PreToolUse": [
       {
         "matcher": "*",

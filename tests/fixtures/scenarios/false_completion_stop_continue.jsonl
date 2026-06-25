@@ -1,4 +1,4 @@
 {"config":{"auto_continue":"gentle","stop_continue_max_per_turn":1}}
-{"checkpoint":{"cwd":"$PROJECT","objective":"Finish false-completion guard","current_step":"One check is still failing.","next_action":"Inspect the failing output before completion.","evidence":"Previous run failed."}}
+{"checkpoint":{"cwd":"$PROJECT","stream_id":"session:e8bc163c82eee18733288c7d","objective":"Finish false-completion guard","current_step":"One check is still failing.","next_action":"Inspect the failing output before completion.","evidence":"Previous run failed."}}
 {"event":"Stop","payload":{"cwd":"$PROJECT","session_id":"s1","turn_id":"t1","last_assistant_message":"Done with the parser edit, but tests are still failing and this is not verified."},"expect":{"last_output_has_decision":true,"last_output_contains":["stop-continuation","Inspect the failing output before completion."]}}
 {"assert":{"cwd":"$PROJECT","packet_contains":["Finish false-completion guard"],"active_checkpoint_fields":{"next_action":"Inspect the failing output before completion."},"max_chars":9000}}

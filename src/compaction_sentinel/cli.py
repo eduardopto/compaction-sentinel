@@ -16,26 +16,44 @@ from .core import (
     VERSION,
     active_checkpoint,
     append_checkpoint_field,
+    backup_codex_context_state,
     build_resume_packet,
+    compact_audit,
+    compact_status,
     config_int,
     connect,
     default_codex_home,
     export_project,
     handle_hook,
+    import_codex_context,
+    inspect_codex_context,
     latest_checkpoint,
+    list_memory_candidates,
+    list_quarantine,
     load_runtime_config,
     log,
+    list_streams,
+    peer_conflict_warnings,
     project_from_cli,
     read_json_stdin,
     recent_events,
+    remember_stream,
     save_checkpoint,
     save_note,
     scrub_all,
     scrub_project,
     search_events,
     safe_print_json,
+    stream_from_cli_args,
+    set_quarantine,
+    write_migration_rollback,
     write_runtime_config,
 )
+
+
+def add_stream_args(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument("--stream", default=None, help="Optional Sentinel stream id/work lane.")
+    parser.add_argument("--stream-label", default="", help="Optional human-readable stream label.")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -114,11 +132,13 @@ def build_parser() -> argparse.ArgumentParser:
     checkpoint.add_argument("--last-verified-at", default="")
     checkpoint.add_argument("--confidence", default="")
     checkpoint.add_argument("--cwd", default=None)
+    add_stream_args(checkpoint)
 
     note = sub.add_parser("note", help="Write a continuity note for the current project.")
     note.add_argument("content")
     note.add_argument("--when", dest="surface_condition", default="")
     note.add_argument("--cwd", default=None)
+    add_stream_args(note)
 
     evidence = sub.add_parser("evidence", help="Append evidence to the active checkpoint.")
     evidence_sub = evidence.add_subparsers(dest="evidence_command", required=True)
@@ -131,6 +151,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evidence_add.add_argument("--objective", default="")
     evidence_add.add_argument("--cwd", default=None)
+    add_stream_args(evidence_add)
 
     avoid = sub.add_parser("avoid", help="Append a do-not-repeat item to the active checkpoint.")
     avoid_sub = avoid.add_subparsers(dest="avoid_command", required=True)
@@ -138,29 +159,91 @@ def build_parser() -> argparse.ArgumentParser:
     avoid_add.add_argument("content")
     avoid_add.add_argument("--objective", default="")
     avoid_add.add_argument("--cwd", default=None)
+    add_stream_args(avoid_add)
 
     packet = sub.add_parser("packet", help="Print the current resume packet for the current project.")
     packet.add_argument("--cwd", default=None)
     packet.add_argument("--max-chars", type=int, default=None)
+    add_stream_args(packet)
 
     status = sub.add_parser("status", help="Show runtime status for the current project.")
     status.add_argument("--cwd", default=None)
+    add_stream_args(status)
 
     search = sub.add_parser("search", help="Search recorded events for the current project.")
     search.add_argument("query")
     search.add_argument("--cwd", default=None)
     search.add_argument("--limit", type=int, default=8)
+    add_stream_args(search)
 
     scrub = sub.add_parser("scrub", help="Delete stored Sentinel data.")
     scrub_scope = scrub.add_mutually_exclusive_group(required=True)
     scrub_scope.add_argument("--project", action="store_true", help="Delete data for the current project only.")
     scrub_scope.add_argument("--all", action="store_true", help="Delete all Sentinel ledger data.")
     scrub.add_argument("--cwd", default=None)
+    scrub.add_argument("--stream", default=None, help="Delete only one stream within the current project.")
+    scrub.add_argument("--stream-label", default="", help="Accepted for command symmetry; scrub uses --stream.")
 
     export = sub.add_parser("export", help="Export Sentinel data as JSON.")
     export.add_argument("--project", action="store_true", help="Export the current project.")
     export.add_argument("--cwd", default=None)
     export.add_argument("--output", type=Path, default=None)
+    export.add_argument("--stream", default=None, help="Export only one stream within the current project.")
+    export.add_argument("--stream-label", default="", help="Accepted for command symmetry; export uses --stream.")
+
+    stream = sub.add_parser("stream", help="Manage Sentinel workstreams for this project.")
+    stream_sub = stream.add_subparsers(dest="stream_command", required=True)
+    stream_list = stream_sub.add_parser("list", help="List active/recent streams.")
+    stream_list.add_argument("--cwd", default=None)
+    stream_status = stream_sub.add_parser("status", help="Show current stream status.")
+    stream_status.add_argument("--cwd", default=None)
+    add_stream_args(stream_status)
+    stream_claim = stream_sub.add_parser("claim", help="Claim or label the current stream.")
+    stream_claim.add_argument("--cwd", default=None)
+    add_stream_args(stream_claim)
+    stream_claim.add_argument("--label", dest="stream_label", default="", help="Alias for --stream-label.")
+    stream_rename = stream_sub.add_parser("rename", help="Rename a stream label.")
+    stream_rename.add_argument("--cwd", default=None)
+    stream_rename.add_argument("--stream", required=True)
+    stream_rename.add_argument("--label", dest="stream_label", required=True)
+
+    compact = sub.add_parser("compact", help="Inspect compact-event capture status.")
+    compact_sub = compact.add_subparsers(dest="compact_command", required=True)
+    compact_status_parser = compact_sub.add_parser("status", help="Show compact epoch and smoke-gate status.")
+    compact_status_parser.add_argument("--cwd", default=None)
+    add_stream_args(compact_status_parser)
+    compact_audit_parser = compact_sub.add_parser("audit", help="Show recent PreCompact/PostCompact capture events.")
+    compact_audit_parser.add_argument("--cwd", default=None)
+    compact_audit_parser.add_argument("--limit", type=int, default=20)
+    add_stream_args(compact_audit_parser)
+
+    quarantine = sub.add_parser("quarantine", help="Inspect or change quarantined imported/foreign rows.")
+    quarantine_sub = quarantine.add_subparsers(dest="quarantine_command", required=True)
+    quarantine_list = quarantine_sub.add_parser("list", help="List quarantined rows.")
+    quarantine_list.add_argument("--cwd", default=None)
+    quarantine_list.add_argument("--limit", type=int, default=50)
+    quarantine_claim = quarantine_sub.add_parser("claim", help="Claim a quarantined row for the current project.")
+    quarantine_claim.add_argument("table", choices=["events", "checkpoints", "notes", "memory_candidates"])
+    quarantine_claim.add_argument("row_id", type=int)
+    quarantine_claim.add_argument("--cwd", default=None)
+    quarantine_release = quarantine_sub.add_parser("release", help="Release a row back into quarantine.")
+    quarantine_release.add_argument("table", choices=["events", "checkpoints", "notes", "memory_candidates"])
+    quarantine_release.add_argument("row_id", type=int)
+    quarantine_release.add_argument("--reason", default="manual_quarantine")
+    quarantine_release.add_argument("--foreign-project-hint", default="")
+    quarantine_release.add_argument("--cwd", default=None)
+
+    memory_candidates = sub.add_parser("memory-candidates", help="List imported memory candidates.")
+    memory_candidates.add_argument("--cwd", default=None)
+    memory_candidates.add_argument("--include-quarantined", action="store_true")
+    memory_candidates.add_argument("--limit", type=int, default=50)
+
+    migrate = sub.add_parser("migrate", help="Run staged migrations from adjacent continuity tools.")
+    migrate_sub = migrate.add_subparsers(dest="migrate_command", required=True)
+    migrate_cc = migrate_sub.add_parser("codex-context", help="Inspect or import ~/.codex/codex-context state.")
+    migrate_cc_mode = migrate_cc.add_mutually_exclusive_group(required=True)
+    migrate_cc_mode.add_argument("--dry-run", action="store_true", help="Inspect codex-context and print planned actions only.")
+    migrate_cc_mode.add_argument("--apply", action="store_true", help="Back up state, import rows, and replace codex-context hooks.")
 
     retention = sub.add_parser("retention", help="Manage data retention.")
     retention_sub = retention.add_subparsers(dest="retention_command", required=True)
@@ -214,11 +297,15 @@ def json_print(value: Any) -> None:
     print(json.dumps(value, indent=2, sort_keys=True))
 
 
-def checkpoint_objective(args: argparse.Namespace, db: Any, project: Any) -> str:
+def checkpoint_objective(args: argparse.Namespace, db: Any, project: Any, stream_id: str) -> str:
     if args.objective:
         return str(args.objective)
     if args.same_objective:
-        checkpoint = active_checkpoint(db, project) or latest_checkpoint(db, project)
+        checkpoint = active_checkpoint(db, project, stream_id=stream_id) or latest_checkpoint(
+            db,
+            project,
+            stream_id=stream_id,
+        )
         if checkpoint:
             return str(checkpoint["objective"])
     raise SystemExit("--objective is required unless --same-objective can reuse an existing checkpoint")
@@ -274,7 +361,8 @@ def main(argv: list[str] | None = None) -> int:
         project = project_from_cli(args.cwd)
         config = load_runtime_config(codex_home)
         try:
-            objective = checkpoint_objective(args, db, project)
+            stream = stream_from_cli_args(args, project, config, db)
+            objective = checkpoint_objective(args, db, project, stream.id)
             checkpoint_id = save_checkpoint(
                 db,
                 project,
@@ -296,10 +384,15 @@ def main(argv: list[str] | None = None) -> int:
                 confidence=args.confidence,
                 source="cli",
                 redact=bool(config.get("redact", True)),
+                stream=stream,
             )
+            checkpoint = active_checkpoint(db, project, stream_id=stream.id)
+            conflicts = peer_conflict_warnings(db, project, stream.id, checkpoint=checkpoint)
         finally:
             db.close()
-        print(f"Saved checkpoint #{checkpoint_id} for {project.name}.")
+        print(f"Saved checkpoint #{checkpoint_id} for {project.name} stream {stream.id}.")
+        for conflict in conflicts:
+            print(f"Peer awareness: {conflict}")
         return 0
 
     if args.command == "note":
@@ -307,16 +400,18 @@ def main(argv: list[str] | None = None) -> int:
         project = project_from_cli(args.cwd)
         config = load_runtime_config(codex_home)
         try:
+            stream = stream_from_cli_args(args, project, config, db)
             note_id = save_note(
                 db,
                 project,
                 args.content,
                 surface_condition=args.surface_condition,
                 redact=bool(config.get("redact", True)),
+                stream=stream,
             )
         finally:
             db.close()
-        print(f"Saved note #{note_id} for {project.name}.")
+        print(f"Saved note #{note_id} for {project.name} stream {stream.id}.")
         return 0
 
     if args.command == "evidence":
@@ -324,6 +419,7 @@ def main(argv: list[str] | None = None) -> int:
         project = project_from_cli(args.cwd)
         config = load_runtime_config(codex_home)
         try:
+            stream = stream_from_cli_args(args, project, config, db)
             checkpoint_id = append_checkpoint_field(
                 db,
                 project,
@@ -331,10 +427,11 @@ def main(argv: list[str] | None = None) -> int:
                 value=args.content,
                 objective=args.objective or None,
                 redact=bool(config.get("redact", True)),
+                stream=stream,
             )
         finally:
             db.close()
-        print(f"Updated checkpoint #{checkpoint_id} for {project.name}.")
+        print(f"Updated checkpoint #{checkpoint_id} for {project.name} stream {stream.id}.")
         return 0
 
     if args.command == "avoid":
@@ -342,6 +439,7 @@ def main(argv: list[str] | None = None) -> int:
         project = project_from_cli(args.cwd)
         config = load_runtime_config(codex_home)
         try:
+            stream = stream_from_cli_args(args, project, config, db)
             checkpoint_id = append_checkpoint_field(
                 db,
                 project,
@@ -349,10 +447,11 @@ def main(argv: list[str] | None = None) -> int:
                 value=args.content,
                 objective=args.objective or None,
                 redact=bool(config.get("redact", True)),
+                stream=stream,
             )
         finally:
             db.close()
-        print(f"Updated checkpoint #{checkpoint_id} for {project.name}.")
+        print(f"Updated checkpoint #{checkpoint_id} for {project.name} stream {stream.id}.")
         return 0
 
     if args.command == "packet":
@@ -366,7 +465,8 @@ def main(argv: list[str] | None = None) -> int:
             minimum=500,
         )
         try:
-            print(build_resume_packet(db, project, reason="cli", max_chars=max_chars))
+            stream = stream_from_cli_args(args, project, config, db)
+            print(build_resume_packet(db, project, reason="cli", max_chars=max_chars, stream=stream))
         finally:
             db.close()
         return 0
@@ -374,9 +474,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "status":
         db = connect(codex_home)
         project = project_from_cli(args.cwd)
+        config = load_runtime_config(codex_home)
         try:
-            checkpoint = active_checkpoint(db, project)
-            events = recent_events(db, project, limit=5)
+            stream = stream_from_cli_args(args, project, config, db)
+            checkpoint = active_checkpoint(db, project, stream_id=stream.id)
+            events = recent_events(db, project, limit=5, stream_id=stream.id)
+            streams = list_streams(db, project)
+            conflicts = peer_conflict_warnings(db, project, stream.id, checkpoint=checkpoint)
         finally:
             db.close()
         json_print(
@@ -385,7 +489,10 @@ def main(argv: list[str] | None = None) -> int:
                 "project": project.name,
                 "project_root": str(project.root),
                 "codex_home": str(codex_home),
+                "current_stream": {"stream_id": stream.id, "stream_label": stream.label},
                 "active_checkpoint": dict(checkpoint) if checkpoint else None,
+                "peer_streams": [item for item in streams if item.get("stream_id") != stream.id],
+                "peer_conflicts": conflicts,
                 "recent_events": [dict(row) for row in events],
             }
         )
@@ -394,8 +501,10 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "search":
         db = connect(codex_home)
         project = project_from_cli(args.cwd)
+        config = load_runtime_config(codex_home)
         try:
-            rows = search_events(db, project, args.query, limit=args.limit)
+            stream = stream_from_cli_args(args, project, config, db)
+            rows = search_events(db, project, args.query, limit=args.limit, stream_id=stream.id)
         finally:
             db.close()
         for row in rows:
@@ -413,7 +522,8 @@ def main(argv: list[str] | None = None) -> int:
                     "scope": "project",
                     "project": project.name,
                     "project_root": str(project.root),
-                    "deleted": scrub_project(db, project),
+                    "stream_id": args.stream,
+                    "deleted": scrub_project(db, project, stream_id=args.stream),
                 }
         finally:
             db.close()
@@ -424,7 +534,7 @@ def main(argv: list[str] | None = None) -> int:
         db = connect(codex_home)
         project = project_from_cli(args.cwd)
         try:
-            data = export_project(db, project)
+            data = export_project(db, project, stream_id=args.stream)
         finally:
             db.close()
         text = json.dumps(data, indent=2, sort_keys=True)
@@ -435,6 +545,166 @@ def main(argv: list[str] | None = None) -> int:
         else:
             print(text)
         return 0
+
+    if args.command == "stream":
+        db = connect(codex_home)
+        project = project_from_cli(getattr(args, "cwd", None))
+        config = load_runtime_config(codex_home)
+        try:
+            if args.stream_command == "list":
+                streams = list_streams(db, project)
+                conflicts_by_stream = {
+                    item["stream_id"]: peer_conflict_warnings(db, project, str(item["stream_id"]))
+                    for item in streams
+                    if item.get("status") in {"active", "blocked"}
+                }
+                json_print(
+                    {
+                        "project": project.name,
+                        "project_root": str(project.root),
+                        "streams": streams,
+                        "peer_conflicts_by_stream": {
+                            stream_id: conflicts
+                            for stream_id, conflicts in conflicts_by_stream.items()
+                            if conflicts
+                        },
+                    }
+                )
+                return 0
+            stream = stream_from_cli_args(args, project, config, db)
+            if args.stream_command in {"claim", "rename"}:
+                remember_stream(db, project, stream)
+            checkpoint = active_checkpoint(db, project, stream_id=stream.id)
+            events = recent_events(db, project, limit=5, stream_id=stream.id)
+            streams = list_streams(db, project)
+            json_print(
+                {
+                    "project": project.name,
+                    "project_root": str(project.root),
+                    "current_stream": {"stream_id": stream.id, "stream_label": stream.label},
+                    "active_checkpoint": dict(checkpoint) if checkpoint else None,
+                    "peer_streams": [item for item in streams if item.get("stream_id") != stream.id],
+                    "peer_conflicts": peer_conflict_warnings(db, project, stream.id, checkpoint=checkpoint),
+                    "recent_events": [dict(row) for row in events],
+                }
+            )
+        finally:
+            db.close()
+        return 0
+
+    if args.command == "compact":
+        db = connect(codex_home)
+        project = project_from_cli(getattr(args, "cwd", None))
+        config = load_runtime_config(codex_home)
+        try:
+            stream = stream_from_cli_args(args, project, config, db)
+            if args.compact_command == "status":
+                result = compact_status(db, project, stream)
+            else:
+                result = compact_audit(db, project, stream, limit=args.limit)
+            result["compact_context_smoke_passed"] = bool(config.get("compact_context_smoke_passed"))
+            result["compact_resume_injection"] = bool(config.get("compact_resume_injection"))
+            result["capture_only"] = not (result["compact_context_smoke_passed"] and result["compact_resume_injection"])
+            json_print(result)
+        finally:
+            db.close()
+        return 0
+
+    if args.command == "quarantine":
+        db = connect(codex_home)
+        project = project_from_cli(getattr(args, "cwd", None)) if getattr(args, "cwd", None) else None
+        try:
+            if args.quarantine_command == "list":
+                json_print(
+                    {
+                        "project": project.name if project else None,
+                        "project_root": str(project.root) if project else None,
+                        "rows": list_quarantine(db, project, limit=args.limit),
+                    }
+                )
+                return 0
+            if args.quarantine_command == "claim":
+                changed = set_quarantine(db, args.table, args.row_id, reason=None, foreign_project_hint=None)
+                json_print({"claimed": changed, "table": args.table, "row_id": args.row_id})
+                return 0
+            if args.quarantine_command == "release":
+                changed = set_quarantine(
+                    db,
+                    args.table,
+                    args.row_id,
+                    reason=args.reason,
+                    foreign_project_hint=args.foreign_project_hint,
+                )
+                json_print({"released": changed, "table": args.table, "row_id": args.row_id, "reason": args.reason})
+                return 0
+        finally:
+            db.close()
+
+    if args.command == "memory-candidates":
+        db = connect(codex_home)
+        project = project_from_cli(args.cwd) if args.cwd else None
+        try:
+            json_print(
+                {
+                    "project": project.name if project else None,
+                    "project_root": str(project.root) if project else None,
+                    "memory_candidates": list_memory_candidates(
+                        db,
+                        project,
+                        include_quarantined=args.include_quarantined,
+                        limit=args.limit,
+                    ),
+                }
+            )
+        finally:
+            db.close()
+        return 0
+
+    if args.command == "migrate":
+        if args.migrate_command == "codex-context":
+            inspection = inspect_codex_context(codex_home)
+            hook_entries = installer.codex_context_hook_entries(codex_home)
+            inspection["codex_context_hook_entries"] = hook_entries
+            config_path = codex_home / "config.toml"
+            inspection["mcp_config"] = {
+                "path": str(config_path),
+                "exists": config_path.exists(),
+                "mentions_codex_context": "codex_context" in config_path.read_text(encoding="utf-8")
+                if config_path.exists()
+                else False,
+            }
+            if args.dry_run:
+                inspection["dry_run"] = True
+                inspection["writes"] = []
+                json_print(inspection)
+                return 0
+            backup = backup_codex_context_state(codex_home)
+            db = connect(codex_home)
+            try:
+                imported = import_codex_context(
+                    codex_home,
+                    sentinel_db=db,
+                    redact=bool(load_runtime_config(codex_home).get("redact", True)),
+                )
+            finally:
+                db.close()
+            hooks = installer.replace_codex_context_hooks(codex_home)
+            manifest = {
+                "version": VERSION,
+                "migration": "codex-context",
+                "created_at": None,
+                "backup": backup,
+                "inspection": inspection,
+                "import": imported,
+                "hooks": hooks,
+            }
+            from .core import utc_now
+
+            manifest["created_at"] = utc_now()
+            rollback = write_migration_rollback(codex_home, manifest)
+            manifest["rollback_manifest"] = str(rollback)
+            json_print(manifest)
+            return 0
 
     if args.command == "retention":
         config = load_runtime_config(codex_home)

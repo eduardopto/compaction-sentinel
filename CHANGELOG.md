@@ -1,5 +1,29 @@
 # Changelog
 
+## 0.5.0
+
+- Modernizes Sentinel around native Codex auto-compaction, hooks, memories, and observed thread/worktree metadata while keeping Sentinel as the explicit live-work layer.
+- Adds schema `PRAGMA user_version = 500` with compact epoch, source provenance, thread metadata, foreign-project hints, and quarantine fields on events, checkpoints, and notes.
+- Adds staged `codex-context` migration: `cs migrate codex-context --dry-run` is inspect-only; `--apply` backs up state, imports with stable source keys, writes rollback metadata, and replaces active `codex-context` hook entries.
+- Adds capture-only `PreCompact` and `PostCompact` support with `manual|auto` matchers. Compact hooks record snapshots and `compaction_epoch`; compact resume injection stays gated behind a runtime smoke flag.
+- Makes `SessionStart(source="compact")` non-intrusive by default so native compact resumes do not get duplicate packet injection.
+- Tightens stream derivation order to explicit stream, thread/conversation ids, existing session/transcript maps, new `session:<hash>`, then warned `default`.
+- Adds project-pollution quarantine and `cs quarantine list|claim|release`; quarantined rows never feed active packets, active checkpoint selection, loop warnings, or default search.
+- Adds memory candidates for imported historian records plus `cs memory-candidates`, without promoting imported records to active objectives.
+- Extends CLI/MCP status with current stream, peer streams, compact epoch, and quarantine count.
+- Updates installer/doctor to detect competing `codex-context` injectors, include compact hooks in all profiles, and repair only through install/repair/apply paths with backups.
+
+## 0.4.7
+
+- Adds stream-aware isolation so multiple Codex agents in the same repo keep separate active checkpoint lanes.
+- Derives streams automatically from hook session ids, CLI thread context, `COMPACTION_SENTINEL_STREAM`, explicit CLI/MCP stream values, or the default single-agent lane.
+- Adds `stream_id` and `stream_label` to events, checkpoints, and notes, with safe migrations and stream lookup indexes.
+- Makes checkpoint supersession, evidence appends, notes, packets, search, export, and scrub stream-aware.
+- Adds peer workstream awareness and lightweight peer-conflict warnings during packet/status/checkpoint paths only; hot PreToolUse/PostToolUse paths do not run peer scans.
+- Adds `cs stream list`, `cs stream claim`, `cs stream status`, and `cs stream rename`, plus `--stream`/`--stream-label` support on state commands.
+- Extends MCP tools with optional stream fields and status output that shows current stream plus peer streams.
+- Adds unit tests, replay coverage, and benchmark coverage for multi-stream isolation.
+
 ## 0.4.6
 
 - Changes the installed skill to prefer the local `~/.codex/bin/cs` CLI for normal checkpoint, evidence, avoid-list, packet, and status writes.

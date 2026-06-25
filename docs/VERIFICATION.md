@@ -24,6 +24,8 @@ Replay fixtures live in `tests/fixtures/scenarios/`:
 - `project_switching.jsonl`
 - `stop_auto_continue_loop.jsonl`
 - `mcp_cwd_contract.jsonl`
+- `multi_agent_stream_isolation.jsonl`
+- `normal_long_mcp_checkpoint.jsonl`
 - `false_completion_stop_continue.jsonl`
 - `long_noisy_packet_budget.jsonl`
 - `doc_source_read_false_failure.jsonl`
@@ -36,7 +38,7 @@ Run one scenario:
 python3 scripts/replay_hooks.py tests/fixtures/scenarios/stale_restart_after_compaction.jsonl
 ```
 
-The harness asserts objective preservation, next action preservation, loop warnings, redaction, DB contents, event category counts, state-key cleanup, packet budget, project isolation, MCP `cwd` enforcement, false-completion handling, false-positive doc/source read handling, and Stop continuation caps.
+The harness asserts objective preservation, next action preservation, loop warnings, redaction, DB contents, event category counts, state-key cleanup, packet budget, project isolation, multi-agent stream isolation, MCP `cwd` enforcement, false-completion handling, false-positive doc/source read handling, and Stop continuation caps.
 
 Unit tests also assert the installed skill is CLI-first for normal Full Access state writes and does not regress to MCP-first guidance that can trigger extra app approval prompts.
 

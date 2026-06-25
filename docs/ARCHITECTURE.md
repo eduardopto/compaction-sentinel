@@ -14,6 +14,7 @@ Hooks run at lifecycle boundaries:
 
 - `SessionStart`: inject latest packet.
 - `UserPromptSubmit`: record prompt, infer fresh goals, inject packet.
+- `PreCompact`/`PostCompact`: capture compact snapshots and compact epochs without relying on model-visible context by default.
 - `PreToolUse`: record planned tool actions and warn on repeated command loops when the selected hooks profile includes hot hooks.
 - `PermissionRequest`: record approval context and repeated approval requests without deciding for the user.
 - `PostToolUse`: record compact outcomes and warn when a failed pattern repeats when the selected hooks profile includes hot hooks.
@@ -21,13 +22,15 @@ Hooks run at lifecycle boundaries:
 
 The hook CLI is fail-open: unexpected exceptions are logged and return `{}` so Codex work is not blocked by Sentinel.
 
-Hook profiles trade visibility for overhead. `full` and `balanced` install all hook events; `light` omits `PreToolUse` and `PostToolUse` while leaving startup, prompt, permission, Stop, skill, and MCP continuity in place. Runtime `performance_mode` controls how much work the installed hot hooks do.
+Hook profiles trade visibility for overhead. `full` and `balanced` install all hook events; `light` omits `PreToolUse` and `PostToolUse` while leaving startup, prompt, compact capture, permission, Stop, skill, and MCP continuity in place. Runtime `performance_mode` controls how much work the installed hot hooks do.
 
 3. SQLite Ledger
 
-The ledger is local, durable, and compact. It stores events, checkpoints, notes, and small state keys per project root.
+The ledger is local, durable, and compact. It stores events, checkpoints, notes, memory candidates, and small state keys per project root and stream.
 
-New active checkpoints supersede older active checkpoints. Complete checkpoints close active work for that project.
+New active checkpoints supersede older active checkpoints only in the same stream. Complete checkpoints close active work for that stream.
+
+Quarantined rows remain stored for audit but are excluded from active packets, active checkpoint selection, loop warnings, and default search until explicitly claimed.
 
 4. Packet Builder
 
@@ -35,6 +38,7 @@ Packet v2 turns ledger state into a ranked brief:
 
 - Authority.
 - Project.
+- Stream.
 - Active objective.
 - Acceptance criteria.
 - Current state.
@@ -45,6 +49,7 @@ Packet v2 turns ledger state into a ranked brief:
 - Continuity notes.
 - Recent event trail.
 - Resume contract.
+- Peer workstreams as awareness only.
 
 5. MCP Server
 
@@ -52,7 +57,7 @@ MCP tools let Codex explicitly write and query continuity state when available. 
 
 6. CLI
 
-The CLI is both user-facing and hook-facing. User commands manage checkpoints, evidence, avoid items, scrub/export, retention, config, backups, install repair, and uninstall.
+The CLI is both user-facing and hook-facing. User commands manage checkpoints, evidence, avoid items, streams, compact status/audit, quarantine, memory candidates, staged codex-context migration, scrub/export, retention, config, backups, install repair, and uninstall.
 
 ## Design Boundaries
 
@@ -61,7 +66,8 @@ The CLI is both user-facing and hook-facing. User commands manage checkpoints, e
 - Sentinel does not store full transcripts by default.
 - Sentinel redacts secrets before storing hook text by default.
 - Stop continuation is opt-in and capped.
-- Stop continuation state is keyed by hashed project root, session/turn, and optional checkpoint id; it never needs raw project paths in state keys.
+- Stop continuation state is keyed by hashed project root, stream, session/turn, and optional checkpoint id; it never needs raw project paths in state keys.
+- Peer-stream conflict warnings read active checkpoints only and do not run on every hot tool hook.
 - Installer writes are backed up and atomic where practical.
 - Plugin packaging exists, but user-level hooks are the reliable install path today.
 
@@ -75,6 +81,7 @@ The CLI is both user-facing and hook-facing. User commands manage checkpoints, e
 - Goal UI survives while work effectively stops.
 - A new thread starts in the same project without the old investigation packet.
 - Two projects write checkpoints without bleeding state into each other.
+- Multiple agents in one project keep separate active checkpoint lanes and see peers only as awareness.
 
 ## Failure Modes Not Fully Solved
 
@@ -83,3 +90,4 @@ The CLI is both user-facing and hook-facing. User commands manage checkpoints, e
 - If the agent ignores injected context, the user may still need to ask it to use the skill or inspect `~/.codex/bin/cs packet --cwd "$PWD"`.
 - If a task has no checkpoint and no useful hook history, the packet can only preserve recent events.
 - Hook coverage is not complete for every possible tool path, so warnings are a continuity guardrail rather than complete enforcement.
+- Streams reduce Sentinel continuity drift between agents, but they do not replace normal git/worktree merge discipline.

@@ -214,8 +214,9 @@ def run_assertions(
     db = connect(codex_home)
     project = project_from_cli(cwd)
     try:
-        packet = build_resume_packet(db, project, reason="replay")
-        checkpoint = active_checkpoint(db, project)
+        stream_id = assertions.get("stream_id")
+        packet = build_resume_packet(db, project, reason="replay", stream_id=str(stream_id) if stream_id else None)
+        checkpoint = active_checkpoint(db, project, stream_id=str(stream_id) if stream_id else None)
         db_text = dump_db_text(db)
         event_count = int(
             db.execute(

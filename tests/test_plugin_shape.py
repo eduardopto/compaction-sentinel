@@ -9,6 +9,8 @@ ROOT = Path(__file__).resolve().parents[1]
 EXPECTED_HOOK_EVENTS = {
     "SessionStart",
     "UserPromptSubmit",
+    "PreCompact",
+    "PostCompact",
     "PreToolUse",
     "PermissionRequest",
     "PostToolUse",
@@ -58,6 +60,8 @@ class PluginShapeTests(unittest.TestCase):
                 self.assertIn("compaction_sentinel.cli hook " + event_name, text)
                 if event_name in {"PreToolUse", "PermissionRequest", "PostToolUse"}:
                     self.assertIn('"matcher": "*"', text)
+                if event_name in {"PreCompact", "PostCompact"}:
+                    self.assertIn('"matcher": "manual|auto"', text)
 
 
 if __name__ == "__main__":

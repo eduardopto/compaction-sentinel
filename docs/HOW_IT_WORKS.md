@@ -12,6 +12,8 @@ Compaction Sentinel is not a second agent and not a replacement for OpenAI serve
 
 You do not need to say "use Compaction Sentinel" in every chat after installation and restart.
 
+Each Codex session/workstream gets a Sentinel stream inside the project. The current stream's checkpoint is authoritative; peer streams are shown only as awareness so multiple agents in one repo do not inherit each other's objective.
+
 The skill prefers the local `~/.codex/bin/cs` CLI for normal Codex Desktop work. Codex Full Access applies to shell/filesystem operations, while MCP/plugin tools may still trigger separate approval prompts in some app configurations. The CLI writes the same local ledger and avoids that extra prompt path.
 
 All MCP tools still require an explicit `cwd`. This avoids a subtle but serious reliability bug: a model or MCP server process should never guess which project should receive continuity state.
@@ -32,8 +34,10 @@ Plain `cs` is a shell convenience, not the install contract. The guaranteed comm
 
 | Event | What Sentinel Does |
 | --- | --- |
-| `SessionStart` | Records the session start and injects the latest project packet |
+| `SessionStart` | Records the session start and injects the latest project packet; `source="compact"` is capture-only unless compact-context smoke has passed |
 | `UserPromptSubmit` | Records the prompt, infers `set goal:` objectives, and injects the packet |
+| `PreCompact` | Captures a compact snapshot and advances `compaction_epoch`; capture-only by default |
+| `PostCompact` | Captures the post-compact snapshot at the current `compaction_epoch`; capture-only by default |
 | `PreToolUse` | Records intended tool use and warns on repeated command patterns when the selected hooks profile includes hot hooks |
 | `PermissionRequest` | Records approval context and repeated approval requests; never auto-approves |
 | `PostToolUse` | Records compact tool result summaries and warns on repeated real failure loops when the selected hooks profile includes hot hooks |
@@ -50,6 +54,7 @@ The packet is a ranked operating brief, not a raw log:
 - Do-not-repeat items and regression warnings.
 - Recent event trail only as supporting context.
 - Resume contract that tells Codex to continue the live task, not restart from the last user message.
+- Peer workstreams only as awareness; they never replace the current stream's active objective or next action.
 
 The default packet budget is intentionally moderate. Increase `max_packet_chars` for debugging, or lower it for very large sessions.
 
@@ -86,7 +91,36 @@ confidence
 status
 ```
 
-New active checkpoints supersede older active checkpoints for the same project. A complete checkpoint closes active work for that project.
+New active checkpoints supersede older active checkpoints for the same project and stream only. A complete checkpoint closes active work for that stream.
+
+## Streams
+
+Streams are automatic. The derivation order is explicit CLI/MCP `stream_id`, hook payload `stream_id`, `thread_id`, `codex_thread_id`, `conversation_id`, existing `session_id` map, existing `transcript_path` map, new `session:<hash(session_id)>`, then `default`.
+
+Useful stream commands:
+
+```bash
+~/.codex/bin/cs stream claim --cwd "$PWD" --label "Phase 9B hearing perception"
+~/.codex/bin/cs stream status --cwd "$PWD"
+~/.codex/bin/cs stream list --cwd "$PWD"
+```
+
+Peer conflict warnings are deliberately cheap. They read active checkpoints only and run during packet/status/checkpoint paths, not on every hot tool hook.
+
+## Quarantine And Migration
+
+Imported or foreign-looking rows can be quarantined. Quarantined rows are stored for audit, but never enter active packets, active checkpoint selection, loop warnings, or default search.
+
+Useful commands:
+
+```bash
+~/.codex/bin/cs quarantine list --cwd "$PWD"
+~/.codex/bin/cs quarantine claim checkpoints 12 --cwd "$PWD"
+~/.codex/bin/cs compact status --cwd "$PWD"
+~/.codex/bin/cs memory-candidates --cwd "$PWD" --include-quarantined
+```
+
+`cs migrate codex-context --dry-run` reads the legacy database, hook config, and MCP config without writing. `--apply` first backs up state, imports rows with stable source keys, writes rollback metadata, and replaces only active `codex-context` hook entries so two context injectors do not run at once.
 
 Stop continuation state uses a hash of the project root instead of storing raw project paths in state keys. It is capped by `stop_continue_max_per_turn`, also capped by `stop_continue_max_per_checkpoint_per_turn`, and it honors `stop_continue_cooldown_seconds`. A zero turn cap disables Stop continuation even when `auto_continue` is enabled.
 

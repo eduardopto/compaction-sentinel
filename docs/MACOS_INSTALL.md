@@ -34,7 +34,7 @@ Package installs include the skill assets, so they do not require a source check
 ## What The Installer Writes
 
 - `~/.codex/compaction-sentinel/` runtime files and SQLite database.
-- `~/.codex/hooks.json` entries for the selected hook profile. The default `balanced` profile installs `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
+- `~/.codex/hooks.json` entries for the selected hook profile. The default `balanced` profile installs `SessionStart`, `UserPromptSubmit`, `PreCompact`, `PostCompact`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
 - `~/.codex/config.toml` MCP entry.
 - `~/.codex/skills/compaction-sentinel` skill copy when `--skills-target codex` or `both` is used.
 - `~/.agents/skills/compaction-sentinel` skill copy when `--skills-target agents` or `both` is used.

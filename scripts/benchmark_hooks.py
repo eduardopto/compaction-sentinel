@@ -14,7 +14,16 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "src"))
 
-from compaction_sentinel.core import connect, db_path, handle_hook
+from compaction_sentinel.core import (
+    build_resume_packet,
+    connect,
+    db_path,
+    handle_hook,
+    list_streams,
+    project_from_cli,
+    record_event,
+    save_checkpoint,
+)
 
 
 def timed(label: str, count: int, fn) -> dict[str, float | int | str]:
@@ -133,6 +142,42 @@ def run_benchmark(*, quick: bool = False, performance_mode: str = "balanced") ->
         ]
         db = connect(home)
         try:
+            project_scope = project_from_cli(str(project))
+            multi_start = time.perf_counter()
+            for stream_index in range(10):
+                stream_id = f"bench-stream-{stream_index}"
+                save_checkpoint(
+                    db,
+                    project_scope,
+                    objective=f"Benchmark stream {stream_index}",
+                    next_action=f"Continue stream {stream_index}",
+                    files_touched=f"src/module_{stream_index % 3}/file.py",
+                    stream_id=stream_id,
+                    stream_label=f"Bench stream {stream_index}",
+                )
+                for event_index in range(100 if not quick else 10):
+                    record_event(
+                        db,
+                        project_scope,
+                        {
+                            "cwd": str(project),
+                            "session_id": stream_id,
+                            "stream_id": stream_id,
+                            "turn_id": f"multi-{event_index}",
+                            "tool_use_id": f"{stream_id}-{event_index}",
+                        },
+                        event_name="PreToolUse",
+                        kind="tool:Bash",
+                        summary=f"sed -n '1,40p' src/module_{stream_index % 3}/file.py",
+                        max_events=2000,
+                    )
+            packet_start = time.perf_counter()
+            packet = build_resume_packet(db, project_scope, stream_id="bench-stream-3", max_chars=4000)
+            packet_ms = (time.perf_counter() - packet_start) * 1000
+            list_start = time.perf_counter()
+            streams = list_streams(db, project_scope)
+            list_ms = (time.perf_counter() - list_start) * 1000
+            multi_ms = (time.perf_counter() - multi_start) * 1000
             event_count = db.execute("SELECT COUNT(*) AS count FROM events").fetchone()["count"]
         finally:
             db.close()
@@ -143,6 +188,13 @@ def run_benchmark(*, quick: bool = False, performance_mode: str = "balanced") ->
             "results": results,
             "db_size_bytes": ledger.stat().st_size if ledger.exists() else 0,
             "event_count": int(event_count),
+            "multi_stream": {
+                "streams": len(streams),
+                "packet_chars": len(packet),
+                "setup_ms": round(multi_ms, 4),
+                "packet_ms": round(packet_ms, 4),
+                "stream_list_ms": round(list_ms, 4),
+            },
         }
 
 

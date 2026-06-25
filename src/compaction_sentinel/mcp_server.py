@@ -16,12 +16,17 @@ from .core import (
     build_resume_packet,
     config_int,
     connect,
+    current_compaction_epoch,
+    list_streams,
     load_runtime_config,
+    peer_conflict_warnings,
     project_from_cli,
+    quarantine_count,
     recent_events,
     save_checkpoint,
     save_note,
     search_events,
+    stream_from_payload,
 )
 
 
@@ -43,6 +48,13 @@ CHECKPOINT_PROPERTIES: dict[str, Any] = {
     "last_verified_at": {"type": "string"},
     "confidence": {"type": "string"},
     "cwd": {"type": "string"},
+    "stream_id": {"type": "string"},
+    "stream_label": {"type": "string"},
+}
+
+STREAM_PROPERTIES: dict[str, Any] = {
+    "stream_id": {"type": "string"},
+    "stream_label": {"type": "string"},
 }
 
 
@@ -70,6 +82,7 @@ TOOLS = [
                 },
                 "objective": {"type": "string"},
                 "cwd": {"type": "string"},
+                **STREAM_PROPERTIES,
             },
             "required": ["content", "cwd"],
         },
@@ -83,6 +96,7 @@ TOOLS = [
                 "content": {"type": "string"},
                 "objective": {"type": "string"},
                 "cwd": {"type": "string"},
+                **STREAM_PROPERTIES,
             },
             "required": ["content", "cwd"],
         },
@@ -96,6 +110,7 @@ TOOLS = [
                 "content": {"type": "string"},
                 "surface_condition": {"type": "string"},
                 "cwd": {"type": "string"},
+                **STREAM_PROPERTIES,
             },
             "required": ["content", "cwd"],
         },
@@ -108,6 +123,7 @@ TOOLS = [
             "properties": {
                 "cwd": {"type": "string"},
                 "max_chars": {"type": "integer", "default": DEFAULT_MAX_PACKET_CHARS},
+                **STREAM_PROPERTIES,
             },
             "required": ["cwd"],
         },
@@ -121,6 +137,7 @@ TOOLS = [
                 "query": {"type": "string"},
                 "cwd": {"type": "string"},
                 "limit": {"type": "integer", "default": 8},
+                **STREAM_PROPERTIES,
             },
             "required": ["query", "cwd"],
         },
@@ -130,7 +147,7 @@ TOOLS = [
         "description": "Show active checkpoint and recent event status for the active project.",
         "inputSchema": {
             "type": "object",
-            "properties": {"cwd": {"type": "string"}},
+            "properties": {"cwd": {"type": "string"}, **STREAM_PROPERTIES},
             "required": ["cwd"],
         },
     },
@@ -191,6 +208,7 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
     db = connect(codex_home)
     project = project_from_cli(cwd)
     try:
+        stream = stream_from_payload(args, project, config, db)
         if name == "compaction_checkpoint":
             checkpoint_id = save_checkpoint(
                 db,
@@ -213,8 +231,14 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
                 confidence=str(args.get("confidence") or ""),
                 source="mcp",
                 redact=redact,
+                stream=stream,
             )
-            send(result(req.get("id"), f"Saved Compaction Sentinel checkpoint #{checkpoint_id} for {project.name}."))
+            checkpoint = active_checkpoint(db, project, stream_id=stream.id)
+            conflicts = peer_conflict_warnings(db, project, stream.id, checkpoint=checkpoint)
+            suffix = ""
+            if conflicts:
+                suffix = "\nPeer awareness:\n" + "\n".join(f"- {conflict}" for conflict in conflicts)
+            send(result(req.get("id"), f"Saved Compaction Sentinel checkpoint #{checkpoint_id} for {project.name} stream {stream.id}.{suffix}"))
             return
         if name == "compaction_evidence_add":
             checkpoint_id = append_checkpoint_field(
@@ -224,8 +248,9 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
                 value=str(args.get("content") or ""),
                 objective=str(args.get("objective") or "") or None,
                 redact=redact,
+                stream=stream,
             )
-            send(result(req.get("id"), f"Updated Compaction Sentinel checkpoint #{checkpoint_id} for {project.name}."))
+            send(result(req.get("id"), f"Updated Compaction Sentinel checkpoint #{checkpoint_id} for {project.name} stream {stream.id}."))
             return
         if name == "compaction_avoid_add":
             checkpoint_id = append_checkpoint_field(
@@ -235,8 +260,9 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
                 value=str(args.get("content") or ""),
                 objective=str(args.get("objective") or "") or None,
                 redact=redact,
+                stream=stream,
             )
-            send(result(req.get("id"), f"Updated Compaction Sentinel checkpoint #{checkpoint_id} for {project.name}."))
+            send(result(req.get("id"), f"Updated Compaction Sentinel checkpoint #{checkpoint_id} for {project.name} stream {stream.id}."))
             return
         if name == "compaction_note":
             note_id = save_note(
@@ -245,8 +271,9 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
                 str(args.get("content") or ""),
                 surface_condition=str(args.get("surface_condition") or ""),
                 redact=redact,
+                stream=stream,
             )
-            send(result(req.get("id"), f"Saved Compaction Sentinel note #{note_id} for {project.name}."))
+            send(result(req.get("id"), f"Saved Compaction Sentinel note #{note_id} for {project.name} stream {stream.id}."))
             return
         if name == "compaction_packet":
             send(
@@ -263,12 +290,19 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
                             minimum=500,
                         ),
                         loop_threshold=config_int(config, "loop_threshold", DEFAULT_LOOP_THRESHOLD, minimum=1),
+                        stream=stream,
                     ),
                 )
             )
             return
         if name == "compaction_search":
-            rows = search_events(db, project, str(args.get("query") or ""), limit=arg_int(args, "limit", 8, minimum=1))
+            rows = search_events(
+                db,
+                project,
+                str(args.get("query") or ""),
+                limit=arg_int(args, "limit", 8, minimum=1),
+                stream_id=stream.id,
+            )
             text = "\n".join(
                 f"[{row['id']}] {row['created_at']} {row['event_name']}/{row['kind']}: {row['summary']}"
                 for row in rows
@@ -276,8 +310,9 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
             send(result(req.get("id"), text or "No matching Compaction Sentinel events."))
             return
         if name == "compaction_status":
-            checkpoint = active_checkpoint(db, project)
-            events = recent_events(db, project, limit=6)
+            checkpoint = active_checkpoint(db, project, stream_id=stream.id)
+            events = recent_events(db, project, limit=6, stream_id=stream.id)
+            streams = list_streams(db, project)
             send(
                 result(
                     req.get("id"),
@@ -285,7 +320,12 @@ def handle_tool_call(req: dict[str, Any], codex_home: Path | None) -> None:
                         {
                             "project": project.name,
                             "project_root": str(project.root),
+                            "current_stream": {"stream_id": stream.id, "stream_label": stream.label},
+                            "compaction_epoch": current_compaction_epoch(db, project, stream.id),
+                            "quarantine_count": quarantine_count(db, project, stream_id=stream.id),
                             "active_checkpoint": dict(checkpoint) if checkpoint else None,
+                            "peer_streams": [item for item in streams if item.get("stream_id") != stream.id],
+                            "peer_conflicts": peer_conflict_warnings(db, project, stream.id, checkpoint=checkpoint),
                             "recent_events": [dict(row) for row in events],
                         },
                         indent=2,

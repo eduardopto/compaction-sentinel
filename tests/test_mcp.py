@@ -234,6 +234,79 @@ class McpTests(unittest.TestCase):
             self.assertIn("Do the requested reliability pass", packet)
             self.assertIn("Run the reliability test suite", packet)
 
+    def test_mcp_streams_isolate_active_objectives(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project = Path(tmp) / "repo"
+            project.mkdir()
+            (project / ".git").mkdir()
+            responses = self.run_mcp(
+                home,
+                [
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 1,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "compaction_checkpoint",
+                            "arguments": {
+                                "cwd": str(project),
+                                "stream_id": "agent-a",
+                                "stream_label": "Agent A",
+                                "objective": "MCP Agent A objective",
+                                "next_action": "Do A next",
+                                "files_touched": "src/shared.py",
+                            },
+                        },
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 2,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "compaction_checkpoint",
+                            "arguments": {
+                                "cwd": str(project),
+                                "stream_id": "agent-b",
+                                "stream_label": "Agent B",
+                                "objective": "MCP Agent B objective",
+                                "next_action": "Do B next",
+                                "files_touched": "src/shared.py",
+                            },
+                        },
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 3,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "compaction_packet",
+                            "arguments": {"cwd": str(project), "stream_id": "agent-a"},
+                        },
+                    },
+                    {
+                        "jsonrpc": "2.0",
+                        "id": 4,
+                        "method": "tools/call",
+                        "params": {
+                            "name": "compaction_status",
+                            "arguments": {"cwd": str(project), "stream_id": "agent-a"},
+                        },
+                    },
+                ],
+            )
+            packet = responses[2]["result"]["content"][0]["text"]
+            status = responses[3]["result"]["content"][0]["text"]
+            self.assertIn("MCP Agent A objective", packet)
+            self.assertIn("Do A next", packet)
+            self.assertIn("MCP Agent B objective", packet)
+            self.assertIn("awareness=\"only\"", packet)
+            self.assertNotIn("<next_action>\nDo B next", packet)
+            self.assertIn('"stream_id": "agent-a"', status)
+            self.assertIn('"compaction_epoch": 0', status)
+            self.assertIn('"quarantine_count": 0', status)
+            self.assertIn("peer_conflicts", status)
+
 
 if __name__ == "__main__":
     unittest.main()

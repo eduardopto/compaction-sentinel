@@ -1,5 +1,5 @@
-{"checkpoint":{"cwd":"$PROJECT_A","objective":"Finish project A continuity","current_step":"A is halfway through docs.","next_action":"Write A docs."}}
-{"checkpoint":{"cwd":"$PROJECT_B","objective":"Finish project B continuity","current_step":"B is halfway through tests.","next_action":"Run B tests."}}
+{"checkpoint":{"cwd":"$PROJECT_A","stream_id":"session:f55ff16f66f43360266b95db","objective":"Finish project A continuity","current_step":"A is halfway through docs.","next_action":"Write A docs."}}
+{"checkpoint":{"cwd":"$PROJECT_B","stream_id":"session:7dc96f776c8423e57a278548","objective":"Finish project B continuity","current_step":"B is halfway through tests.","next_action":"Run B tests."}}
 {"event":"SessionStart","payload":{"cwd":"$PROJECT_A","session_id":"a1","source":"resume"}}
 {"assert":{"cwd":"$PROJECT_A","active_objective_contains":"Finish project A continuity","packet_contains":["Write A docs."],"packet_not_contains":["Run B tests."]}}
 {"event":"SessionStart","payload":{"cwd":"$PROJECT_B","session_id":"b1","source":"resume"}}

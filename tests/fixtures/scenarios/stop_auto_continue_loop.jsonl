@@ -1,5 +1,5 @@
 {"config":{"auto_continue":"gentle","stop_continue_max_per_turn":1}}
-{"checkpoint":{"cwd":"$PROJECT","objective":"Finish unattended verification","current_step":"Tests are running.","next_action":"Run the next verification command.","evidence":"First smoke passed."}}
+{"checkpoint":{"cwd":"$PROJECT","stream_id":"session:e8bc163c82eee18733288c7d","objective":"Finish unattended verification","current_step":"Tests are running.","next_action":"Run the next verification command.","evidence":"First smoke passed."}}
 {"event":"Stop","payload":{"cwd":"$PROJECT","session_id":"s1","turn_id":"t1","last_assistant_message":"Still working."},"expect":{"last_output_has_decision":true,"last_output_contains":["stop-continuation","Run the next verification command."]}}
 {"event":"Stop","payload":{"cwd":"$PROJECT","session_id":"s1","turn_id":"t1","last_assistant_message":"Still working again."},"expect":{"last_output_empty":true}}
 {"assert":{"cwd":"$PROJECT","state_key_contains":["stop_continue:turn"],"state_key_not_contains":["$PROJECT"],"active_checkpoint_fields":{"objective":"Finish unattended verification"}}}

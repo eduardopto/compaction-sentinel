@@ -7,13 +7,14 @@ import platform
 import re
 import shutil
 import shlex
+import sqlite3
 import sys
 import time
 import tomllib
 from pathlib import Path
 from typing import Any
 
-from .core import VERSION, install_root, load_runtime_config, write_runtime_config
+from .core import VERSION, db_path, install_root, load_runtime_config, write_runtime_config
 
 
 HOOK_MARKER = "compaction-sentinel"
@@ -23,16 +24,20 @@ MIN_PYTHON = (3, 11)
 HOOK_EVENTS = {
     "SessionStart": 10,
     "UserPromptSubmit": 10,
+    "PreCompact": 10,
+    "PostCompact": 10,
     "PreToolUse": 5,
     "PermissionRequest": 5,
     "PostToolUse": 5,
     "Stop": 10,
 }
+NON_HOT_HOOK_EVENTS = ("SessionStart", "UserPromptSubmit", "PreCompact", "PostCompact", "PermissionRequest", "Stop")
 HOOK_PROFILES = {
     "full": tuple(HOOK_EVENTS),
     "balanced": tuple(HOOK_EVENTS),
-    "light": ("SessionStart", "UserPromptSubmit", "PermissionRequest", "Stop"),
+    "light": NON_HOT_HOOK_EVENTS,
 }
+CODEX_CONTEXT_MARKERS = ("codex-context", "codex_context.py")
 
 
 def hook_command(codex_home: Path, event_name: str) -> str:
@@ -353,6 +358,8 @@ def sentinel_hook_group(codex_home: Path, event_name: str, timeout: int) -> dict
     }
     if event_name in {"PreToolUse", "PermissionRequest", "PostToolUse"}:
         group["matcher"] = "*"
+    if event_name in {"PreCompact", "PostCompact"}:
+        group["matcher"] = "manual|auto"
     return group
 
 
@@ -390,6 +397,76 @@ def hook_group_has_marker(group: Any) -> bool:
             if HOOK_MARKER in command or HOOK_MARKER in status:
                 return True
     return False
+
+
+def hook_group_has_codex_context(group: Any) -> bool:
+    if not isinstance(group, dict):
+        return False
+    for hook in group.get("hooks", []):
+        if isinstance(hook, dict):
+            command = str(hook.get("command") or "")
+            if any(marker in command for marker in CODEX_CONTEXT_MARKERS):
+                return True
+    return False
+
+
+def codex_context_hook_entries(codex_home: Path) -> list[dict[str, Any]]:
+    hooks_path = codex_home / "hooks.json"
+    if not hooks_path.exists():
+        return []
+    try:
+        data = json.loads(hooks_path.read_text(encoding="utf-8"))
+    except Exception:
+        return []
+    hooks = data.get("hooks") if isinstance(data, dict) else {}
+    if not isinstance(hooks, dict):
+        return []
+    entries: list[dict[str, Any]] = []
+    for event_name, groups in hooks.items():
+        if not isinstance(groups, list):
+            continue
+        for index, group in enumerate(groups):
+            if hook_group_has_codex_context(group):
+                entries.append({"event_name": event_name, "index": index, "group": group})
+    return entries
+
+
+def replace_codex_context_hooks(codex_home: Path) -> dict[str, Any]:
+    hooks_path = codex_home / "hooks.json"
+    if not hooks_path.exists():
+        return {"removed": 0, "added": [], "hooks_json": str(hooks_path), "changed": False}
+    backup_file(hooks_path)
+    try:
+        data = json.loads(hooks_path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise RuntimeError(f"hooks.json is not valid JSON: {exc}") from exc
+    hooks = data.setdefault("hooks", {})
+    if not isinstance(hooks, dict):
+        hooks = {}
+        data["hooks"] = hooks
+    removed_events: list[str] = []
+    removed = 0
+    for event_name, groups in list(hooks.items()):
+        if not isinstance(groups, list):
+            continue
+        kept = []
+        for group in groups:
+            if hook_group_has_codex_context(group):
+                removed += 1
+                removed_events.append(str(event_name))
+            else:
+                kept.append(group)
+        hooks[event_name] = kept
+    added: list[str] = []
+    for event_name in sorted(set(removed_events)):
+        if event_name not in HOOK_EVENTS:
+            continue
+        groups = hooks.setdefault(event_name, [])
+        if not any(hook_group_has_marker(group) for group in groups):
+            groups.append(sentinel_hook_group(codex_home, event_name, HOOK_EVENTS[event_name]))
+            added.append(event_name)
+    atomic_write_text(hooks_path, json.dumps(data, indent=2) + "\n")
+    return {"removed": removed, "added": added, "hooks_json": str(hooks_path), "changed": bool(removed or added)}
 
 
 def merge_mcp_config(codex_home: Path) -> None:
@@ -586,6 +663,7 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
     issues: list[str] = []
     warnings: list[str] = []
     hooks_by_event: dict[str, bool] = {event_name: False for event_name in HOOK_EVENTS}
+    competing_injectors: list[dict[str, Any]] = []
     if hooks_path.exists():
         try:
             data = json.loads(hooks_path.read_text(encoding="utf-8"))
@@ -594,6 +672,7 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
                     hook_group_has_marker(group)
                     for group in data.get("hooks", {}).get(event_name, [])
                 )
+            competing_injectors = codex_context_hook_entries(codex_home)
         except Exception:
             issues.append("hooks.json is not valid JSON")
     else:
@@ -678,18 +757,21 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
     missing_global_links = [path for path, owned in global_cli_links.items() if not owned]
     if missing_global_links:
         warnings.append("recorded global Sentinel shim is missing or not owned: " + ", ".join(missing_global_links))
+    if competing_injectors:
+        warnings.append(
+            "codex-context hook entries also inject context; run `~/.codex/bin/cs migrate codex-context --apply` or `~/.codex/bin/cs doctor --fix` to replace them"
+        )
     ledger_writable = False
     ledger_error = ""
-    if root.exists():
+    ledger_exists = db_path(codex_home).exists()
+    if ledger_exists:
         try:
-            from .core import connect
-
-            db = connect(codex_home)
+            db = sqlite3.connect(f"file:{db_path(codex_home)}?mode=ro", uri=True)
             db.close()
             ledger_writable = True
         except Exception as exc:
             ledger_error = str(exc)
-            warnings.append("Sentinel ledger is not writable from this environment: " + ledger_error)
+            warnings.append("Sentinel ledger is not readable from this environment: " + ledger_error)
     return {
         "version": VERSION,
         "ok": not issues,
@@ -717,11 +799,13 @@ def doctor(*, codex_home: Path) -> dict[str, Any]:
         "global_cli_links": global_cli_links,
         "hooks_json": str(hooks_path),
         "hooks_by_event": hooks_by_event,
+        "competing_context_injectors": competing_injectors,
         "hooks_present": not missing_expected_hooks,
         "unexpected_hook_events": unexpected_hooks,
         "mcp_present": mcp_present,
         "hooks_feature_present": hooks_feature_present,
         "ledger_writable": ledger_writable,
+        "ledger_exists": ledger_exists,
         "ledger_error": ledger_error,
         "performance_mode": config.get("performance_mode"),
         "auto_continue": config.get("auto_continue"),
@@ -738,6 +822,12 @@ def doctor_fix(*, codex_home: Path, global_bin: Path | None = None) -> dict[str,
         raise RuntimeError("runtime is missing; run `compaction-sentinel install` from a checkout or pipx/uvx install first")
     config = load_runtime_config(codex_home)
     hooks_profile = normalize_hooks_profile(config.get("hooks_profile") or "balanced")
+    replaced = replace_codex_context_hooks(codex_home)
+    if replaced["changed"]:
+        actions.append(
+            "replaced codex-context hooks"
+            + (f" ({', '.join(replaced['added'])})" if replaced.get("added") else "")
+        )
     merge_hooks(codex_home, hooks_profile=hooks_profile)
     actions.append(f"merged hooks.json for hooks_profile={hooks_profile}")
     merge_mcp_config(codex_home)

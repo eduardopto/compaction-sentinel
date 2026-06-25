@@ -19,12 +19,17 @@ When Compaction Sentinel is installed, hooks should already inject a resume pack
 6. If the packet and repository disagree, verify the repository and update the checkpoint.
 7. Do not treat a loop warning as proof of failure; inspect the latest concrete output and then choose a different hypothesis.
 8. Always pass the active project `cwd` to Sentinel: use `--cwd` for CLI calls and `cwd` for MCP calls.
-9. After tests, builds, installs, or other meaningful milestone results, record evidence with `~/.codex/bin/cs evidence add --cwd ...`. Use `compaction_evidence_add` only when the CLI is unavailable or the user explicitly asks for MCP.
-10. After a repeated failed route or ruled-out hypothesis, record it with `~/.codex/bin/cs avoid add --cwd ...`. Use `compaction_avoid_add` only when the CLI is unavailable or the user explicitly asks for MCP.
-11. Before claiming completion, verify the user's acceptance criteria and the latest tool output. Do not claim completion from a checkpoint alone.
-12. When this skill is invoked for a long-running task and no active checkpoint exists, immediately run `~/.codex/bin/cs checkpoint --cwd ...` with objective, acceptance criteria if available, current step, next action, and confidence before doing extended work. Use `compaction_checkpoint` only when the CLI is unavailable or the user explicitly asks for MCP.
-13. Do not call evidence tools after routine file reads, searches, or tiny inspection commands. Batch evidence at milestones.
-14. Prefer one checkpoint per meaningful state transition, not one checkpoint after every tool call.
+9. You are operating in your own Sentinel stream. Do not adopt peer-stream objectives, next actions, or blockers as your own.
+10. If no active checkpoint exists for your stream, create one for your stream before extended work.
+11. For long multi-agent projects, optionally label the stream with `~/.codex/bin/cs stream claim --cwd "$PWD" --label "Phase 9B hearing perception"`. Manual claiming is helpful but not required.
+12. After tests, builds, installs, or other meaningful milestone results, record evidence with `~/.codex/bin/cs evidence add --cwd ...`. Use `compaction_evidence_add` only when the CLI is unavailable or the user explicitly asks for MCP.
+13. After a repeated failed route or ruled-out hypothesis, record it with `~/.codex/bin/cs avoid add --cwd ...`. Use `compaction_avoid_add` only when the CLI is unavailable or the user explicitly asks for MCP.
+14. Before claiming completion, verify the user's acceptance criteria and the latest tool output. Do not claim completion from a checkpoint alone.
+15. When this skill is invoked for a long-running task and no active checkpoint exists, immediately run `~/.codex/bin/cs checkpoint --cwd ...` with objective, acceptance criteria if available, current step, next action, and confidence before doing extended work. Use `compaction_checkpoint` only when the CLI is unavailable or the user explicitly asks for MCP.
+16. Do not call evidence tools after routine file reads, searches, or tiny inspection commands. Batch evidence at milestones.
+17. Prefer one checkpoint per meaningful state transition, not one checkpoint after every tool call.
+18. Treat Sentinel as complementary to native Codex memory and compaction. Native compacted items are opaque; Sentinel stores only local, redacted, human-readable continuity facts.
+19. Quarantined rows are audit-only. Do not use quarantined objectives, next actions, blockers, or search results as active work unless the user or operator explicitly claims them.
 
 ## Seamless Default
 
@@ -32,10 +37,13 @@ For normal Codex Desktop work, prefer the local CLI:
 
 ```bash
 ~/.codex/bin/cs checkpoint --cwd "$PWD" --objective "..." --current-step "..." --next-action "..." --confidence high
+~/.codex/bin/cs stream claim --cwd "$PWD" --label "Phase 9B hearing perception"
 ~/.codex/bin/cs evidence add --cwd "$PWD" "make test passed"
 ~/.codex/bin/cs avoid add --cwd "$PWD" "Do not rerun npm install; dependency issue was already ruled out"
 ~/.codex/bin/cs packet --cwd "$PWD"
 ~/.codex/bin/cs status --cwd "$PWD"
+~/.codex/bin/cs compact status --cwd "$PWD"
+~/.codex/bin/cs quarantine list --cwd "$PWD"
 ```
 
 Reason: Codex Full Access covers shell/filesystem access, while MCP/plugin tools may still trigger separate app approval prompts. The CLI writes the same local Sentinel ledger and is the default path for seamless unattended work.
@@ -59,6 +67,7 @@ Always include `cwd` in MCP calls. Example:
 ```json
 {
   "cwd": "/absolute/path/to/project",
+  "stream_label": "Phase 9B hearing perception",
   "objective": "Fix account deletion and install on device.",
   "current_step": "Native sync passed.",
   "next_action": "Install on the connected iPhone."
@@ -71,12 +80,16 @@ Use the guaranteed CLI path for normal state writes:
 
 ```bash
 ~/.codex/bin/cs checkpoint --cwd "$PWD" --objective "..." --current-step "..." --next-action "..." --evidence "..."
+~/.codex/bin/cs stream claim --cwd "$PWD" --label "Phase 9B hearing perception"
+~/.codex/bin/cs stream status --cwd "$PWD"
 ~/.codex/bin/cs checkpoint --cwd "$PWD" --same-objective --current-step "..." --next-action "..." --tests-passed "..."
 ~/.codex/bin/cs evidence add --cwd "$PWD" "make test passed"
 ~/.codex/bin/cs avoid add --cwd "$PWD" "Do not rerun npm install; dependency issue was already ruled out"
 ~/.codex/bin/cs note --cwd "$PWD" "..." --when "..."
 ~/.codex/bin/cs packet --cwd "$PWD"
 ~/.codex/bin/cs status --cwd "$PWD"
+~/.codex/bin/cs compact status --cwd "$PWD"
+~/.codex/bin/cs quarantine list --cwd "$PWD"
 ~/.codex/bin/cs doctor
 ```
 

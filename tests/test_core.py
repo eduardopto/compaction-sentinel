@@ -10,9 +10,12 @@ from compaction_sentinel.core import (
     active_checkpoint,
     build_resume_packet,
     connect,
+    current_compaction_epoch,
     event_category,
+    export_project,
     get_state,
     handle_hook,
+    hash_text,
     infer_objective,
     is_failure_summary,
     looks_complete,
@@ -20,11 +23,22 @@ from compaction_sentinel.core import (
     project_from_payload,
     project_prune_count_key,
     project_state_prefix,
+    list_streams,
+    list_quarantine,
+    peer_conflict_warnings,
+    quarantine_count,
     redact_text,
     record_event,
     save_checkpoint,
+    append_checkpoint_field,
     scrub_project,
+    set_quarantine,
+    stream_from_payload,
 )
+
+
+def session_stream(session_id: str) -> str:
+    return "session:" + hash_text(session_id)[:24]
 
 
 class CoreTests(unittest.TestCase):
@@ -105,9 +119,403 @@ class CoreTests(unittest.TestCase):
             db = connect(home)
             columns = {row["name"] for row in db.execute("PRAGMA table_info(events)").fetchall()}
             self.assertIn("event_key", columns)
+            self.assertIn("stream_id", columns)
+            note_columns = {row["name"] for row in db.execute("PRAGMA table_info(notes)").fetchall()}
+            self.assertIn("stream_id", note_columns)
             indexes = {row["name"] for row in db.execute("PRAGMA index_list(events)").fetchall()}
             self.assertIn("idx_events_created_at", indexes)
+            self.assertIn("idx_events_project_stream_id", indexes)
             db.close()
+
+    def test_v05_schema_user_version_and_metadata_columns(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            db = connect(home)
+            try:
+                version = db.execute("PRAGMA user_version").fetchone()[0]
+                self.assertEqual(version, 500)
+                for table in ("events", "checkpoints", "notes"):
+                    columns = {row["name"] for row in db.execute(f"PRAGMA table_info({table})").fetchall()}
+                    self.assertIn("compaction_epoch", columns)
+                    self.assertIn("source_system", columns)
+                    self.assertIn("source_ref", columns)
+                    self.assertIn("foreign_project_hint", columns)
+                    self.assertIn("quarantine_reason", columns)
+                    self.assertIn("thread_id", columns)
+                memory_columns = {row["name"] for row in db.execute("PRAGMA table_info(memory_candidates)").fetchall()}
+                self.assertIn("source_ref", memory_columns)
+                self.assertIn("quarantine_reason", memory_columns)
+            finally:
+                db.close()
+
+    def test_stream_fallback_order_is_exact(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            project_path.mkdir()
+            (project_path / ".git").mkdir()
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            try:
+                explicit = stream_from_payload(
+                    {"cwd": str(project_path), "stream_id": "Explicit Lane", "thread_id": "thread-a"},
+                    project,
+                    db=db,
+                )
+                self.assertEqual(explicit.id, "explicit-lane")
+                thread = stream_from_payload({"cwd": str(project_path), "thread_id": "thread-a"}, project, db=db)
+                self.assertEqual(thread.id, "thread-a")
+                mapped = stream_from_payload(
+                    {"cwd": str(project_path), "stream_id": "claimed", "session_id": "s2"},
+                    project,
+                    db=db,
+                )
+                self.assertEqual(mapped.id, "claimed")
+                self.assertEqual(stream_from_payload({"cwd": str(project_path), "session_id": "s2"}, project, db=db).id, "claimed")
+                transcript = stream_from_payload(
+                    {"cwd": str(project_path), "stream_id": "transcript-lane", "transcript_path": "/tmp/transcript.jsonl"},
+                    project,
+                    db=db,
+                )
+                self.assertEqual(transcript.id, "transcript-lane")
+                self.assertEqual(
+                    stream_from_payload({"cwd": str(project_path), "transcript_path": "/tmp/transcript.jsonl"}, project, db=db).id,
+                    "transcript-lane",
+                )
+                self.assertEqual(stream_from_payload({"cwd": str(project_path), "session_id": "s3"}, project, db=db).id, session_stream("s3"))
+                self.assertEqual(stream_from_payload({"cwd": str(project_path)}, project, db=db).id, "default")
+            finally:
+                db.close()
+
+    def test_stream_checkpoints_do_not_supersede_peer_streams(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            project_path.mkdir()
+            (project_path / ".git").mkdir()
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            try:
+                save_checkpoint(
+                    db,
+                    project,
+                    objective="Agent A objective",
+                    next_action="Agent A next action",
+                    stream_id="session-a",
+                    stream_label="Phase 9A",
+                )
+                save_checkpoint(
+                    db,
+                    project,
+                    objective="Agent B objective",
+                    next_action="Agent B next action",
+                    stream_id="session-b",
+                    stream_label="Phase 9B",
+                )
+                save_checkpoint(
+                    db,
+                    project,
+                    objective="Agent A refreshed objective",
+                    next_action="Agent A refreshed next action",
+                    stream_id="session-a",
+                )
+                a = active_checkpoint(db, project, stream_id="session-a")
+                b = active_checkpoint(db, project, stream_id="session-b")
+                self.assertIsNotNone(a)
+                self.assertIsNotNone(b)
+                self.assertIn("Agent A refreshed", a["objective"])
+                self.assertIn("Agent B objective", b["objective"])
+                self.assertIn("Agent B next action", b["next_action"])
+            finally:
+                db.close()
+
+    def test_stream_packet_uses_current_stream_and_peers_are_awareness_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            project_path.mkdir()
+            (project_path / ".git").mkdir()
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            try:
+                save_checkpoint(
+                    db,
+                    project,
+                    objective="Agent A hearing perception",
+                    next_action="Implement hearing debug overlay",
+                    files_touched="src/audio/hearing.ts",
+                    stream_id="session-a",
+                    stream_label="Phase 9B hearing",
+                )
+                save_checkpoint(
+                    db,
+                    project,
+                    objective="Agent B combat perception",
+                    next_action="Rewrite combat controller",
+                    files_touched="src/combat/controller.ts",
+                    stream_id="session-b",
+                    stream_label="Phase 9C combat",
+                )
+                packet = build_resume_packet(db, project, stream_id="session-a")
+            finally:
+                db.close()
+            self.assertIn("<stream>", packet)
+            self.assertIn("session-a", packet)
+            self.assertIn("Agent A hearing perception", packet)
+            self.assertIn("<peer_workstreams awareness=\"only\">", packet)
+            self.assertIn("Agent B combat perception", packet)
+            self.assertIn("Peer workstreams are awareness only", packet)
+            self.assertIn("Implement hearing debug overlay", packet)
+            self.assertNotIn("<next_action>\nRewrite combat controller", packet)
+
+    def test_new_hook_session_does_not_adopt_existing_non_default_stream(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            project_path.mkdir()
+            (project_path / ".git").mkdir()
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            try:
+                save_checkpoint(
+                    db,
+                    project,
+                    objective="Existing Agent A objective",
+                    next_action="Agent A only",
+                    stream_id="agent-a-session",
+                )
+            finally:
+                db.close()
+            out = handle_hook(
+                "UserPromptSubmit",
+                {
+                    "cwd": str(project_path),
+                    "session_id": "agent-b-session",
+                    "turn_id": "t1",
+                    "prompt": "set goal: Existing Agent B objective",
+                },
+                codex_home=home,
+            )
+            packet = out["hookSpecificOutput"]["additionalContext"]
+            db = connect(home)
+            try:
+                a = active_checkpoint(db, project, stream_id="agent-a-session")
+                b = active_checkpoint(db, project, stream_id=session_stream("agent-b-session"))
+            finally:
+                db.close()
+            self.assertIn(session_stream("agent-b-session"), packet)
+            self.assertIn("Existing Agent B objective", packet)
+            self.assertIsNotNone(a)
+            self.assertIsNotNone(b)
+            self.assertIn("Existing Agent A objective", a["objective"])
+            self.assertIn("Existing Agent B objective", b["objective"])
+
+    def test_legacy_default_stream_is_owned_by_first_session_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            project_path.mkdir()
+            (project_path / ".git").mkdir()
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            try:
+                save_checkpoint(
+                    db,
+                    project,
+                    objective="Legacy default objective",
+                    next_action="Legacy next action",
+                )
+            finally:
+                db.close()
+            first = handle_hook(
+                "SessionStart",
+                {"cwd": str(project_path), "session_id": "agent-a-session"},
+                codex_home=home,
+            )
+            self.assertIn("Legacy default objective", first["hookSpecificOutput"]["additionalContext"])
+            second = handle_hook(
+                "UserPromptSubmit",
+                {
+                    "cwd": str(project_path),
+                    "session_id": "agent-b-session",
+                    "turn_id": "t1",
+                    "prompt": "set goal: Fresh Agent B work",
+                },
+                codex_home=home,
+            )
+            db = connect(home)
+            try:
+                default = active_checkpoint(db, project, stream_id="default")
+                b = active_checkpoint(db, project, stream_id=session_stream("agent-b-session"))
+            finally:
+                db.close()
+            self.assertIn(session_stream("agent-b-session"), second["hookSpecificOutput"]["additionalContext"])
+            self.assertIsNotNone(default)
+            self.assertIsNotNone(b)
+            self.assertIn("Legacy default objective", default["objective"])
+            self.assertIn("Fresh Agent B work", b["objective"])
+
+    def test_stream_evidence_scrub_and_export_are_isolated(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            project_path.mkdir()
+            (project_path / ".git").mkdir()
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            try:
+                save_checkpoint(db, project, objective="Agent A objective", stream_id="session-a")
+                save_checkpoint(db, project, objective="Agent B objective", stream_id="session-b")
+                append_checkpoint_field(
+                    db,
+                    project,
+                    field="evidence",
+                    value="Agent A proof",
+                    stream_id="session-a",
+                )
+                a = active_checkpoint(db, project, stream_id="session-a")
+                b = active_checkpoint(db, project, stream_id="session-b")
+                self.assertIn("Agent A proof", a["evidence"])
+                self.assertNotIn("Agent A proof", b["evidence"] or "")
+                export_a = export_project(db, project, stream_id="session-a")
+                export_all = export_project(db, project)
+                self.assertEqual({row["stream_id"] for row in export_a["checkpoints"]}, {"session-a"})
+                self.assertEqual({row["stream_id"] for row in export_all["checkpoints"]}, {"session-a", "session-b"})
+                scrubbed = scrub_project(db, project, stream_id="session-a")
+                self.assertGreater(scrubbed["checkpoints"], 0)
+                self.assertIsNone(active_checkpoint(db, project, stream_id="session-a"))
+                self.assertIsNotNone(active_checkpoint(db, project, stream_id="session-b"))
+                scrub_project(db, project)
+                self.assertIsNone(active_checkpoint(db, project, stream_id="session-b"))
+            finally:
+                db.close()
+
+    def test_peer_conflict_warning_is_awareness_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            project_path.mkdir()
+            (project_path / ".git").mkdir()
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            try:
+                save_checkpoint(
+                    db,
+                    project,
+                    objective="Agent A path",
+                    next_action="Edit current stream",
+                    files_touched="src/shared/router.ts",
+                    stream_id="session-a",
+                    stream_label="A",
+                )
+                save_checkpoint(
+                    db,
+                    project,
+                    objective="Agent B path",
+                    next_action="Peer next action must not become active",
+                    files_touched="src/shared/router.ts",
+                    stream_id="session-b",
+                    stream_label="B",
+                )
+                warnings = peer_conflict_warnings(db, project, "session-a")
+                streams = list_streams(db, project)
+                packet = build_resume_packet(db, project, stream_id="session-a")
+            finally:
+                db.close()
+            self.assertTrue(any("also touches" in warning for warning in warnings))
+            self.assertEqual({item["stream_id"] for item in streams}, {"session-a", "session-b"})
+            self.assertIn("<peer_conflicts awareness=\"only\">", packet)
+            self.assertIn("Agent B path", packet)
+            self.assertNotIn("<next_action>\nPeer next action must not become active", packet)
+
+    def test_compact_hooks_capture_only_and_compact_session_start_is_non_intrusive(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            project_path.mkdir()
+            (project_path / ".git").mkdir()
+            payload = {"cwd": str(project_path), "session_id": "s1", "source": "auto"}
+            pre = handle_hook("PreCompact", payload, codex_home=home)
+            post = handle_hook("PostCompact", payload, codex_home=home)
+            compact_start = handle_hook(
+                "SessionStart",
+                {"cwd": str(project_path), "session_id": "s1", "source": "compact"},
+                codex_home=home,
+            )
+            self.assertEqual(pre, {})
+            self.assertEqual(post, {})
+            self.assertEqual(compact_start, {})
+            db = connect(home)
+            try:
+                project = project_from_payload(payload)
+                self.assertEqual(current_compaction_epoch(db, project, session_stream("s1")), 1)
+                rows = db.execute("SELECT event_name, compaction_epoch FROM events ORDER BY id").fetchall()
+            finally:
+                db.close()
+            self.assertEqual([row["event_name"] for row in rows], ["PreCompact", "PostCompact", "SessionStart"])
+            self.assertEqual([row["compaction_epoch"] for row in rows[:2]], [1, 1])
+
+    def test_quarantined_foreign_checkpoint_is_excluded_until_claimed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            foreign_path = Path(tmp) / "foreign"
+            project_path.mkdir()
+            foreign_path.mkdir()
+            (project_path / ".git").mkdir()
+            (foreign_path / ".git").mkdir()
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            try:
+                save_checkpoint(db, project, objective="Local objective", next_action="Stay local")
+                foreign_id = save_checkpoint(
+                    db,
+                    project,
+                    objective=f"Implement active work in {foreign_path}/app.py",
+                    next_action="Do foreign work",
+                )
+                active = active_checkpoint(db, project)
+                packet = build_resume_packet(db, project)
+                quarantined = list_quarantine(db, project)
+                self.assertEqual(active["objective"], "Local objective")
+                self.assertNotIn("Do foreign work", packet)
+                self.assertEqual(quarantine_count(db, project), 1)
+                self.assertEqual(quarantined[0]["table"], "checkpoints")
+                self.assertTrue(set_quarantine(db, "checkpoints", foreign_id, reason=None))
+                self.assertEqual(active_checkpoint(db, project)["objective"], f"Implement active work in {foreign_path}/app.py")
+                self.assertTrue(set_quarantine(db, "checkpoints", foreign_id, reason="manual_quarantine"))
+                self.assertEqual(active_checkpoint(db, project)["objective"], "Local objective")
+            finally:
+                db.close()
+
+    def test_benign_foreign_reference_read_is_not_quarantined(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            project_path = Path(tmp) / "repo"
+            foreign_path = Path(tmp) / "foreign"
+            project_path.mkdir()
+            foreign_path.mkdir()
+            (project_path / ".git").mkdir()
+            (foreign_path / ".git").mkdir()
+            project = project_from_payload({"cwd": str(project_path)})
+            db = connect(home)
+            try:
+                row = record_event(
+                    db,
+                    project,
+                    {
+                        "cwd": str(project_path),
+                        "tool_name": "Bash",
+                        "tool_input": {"command": f"sed -n '1,20p' {foreign_path}/README.md"},
+                    },
+                    event_name="PreToolUse",
+                    kind="tool:Bash",
+                    summary=f"sed -n '1,20p' {foreign_path}/README.md",
+                )
+                self.assertIsNone(row["quarantine_reason"])
+                self.assertEqual(quarantine_count(db, project), 0)
+            finally:
+                db.close()
 
     def test_retention_is_throttled_but_still_runs_when_due(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -378,6 +786,7 @@ class CoreTests(unittest.TestCase):
                 current_step="Smoke passed",
                 next_action="Run one more check",
                 evidence="smoke passed",
+                stream_id=session_stream("s1"),
             )
             db.close()
             payload = {"cwd": str(project), "session_id": "s1", "turn_id": "t1", "last_assistant_message": "Still working."}
@@ -412,6 +821,7 @@ class CoreTests(unittest.TestCase):
                 objective="Finish verification",
                 current_step="Step one",
                 next_action="Run first check",
+                stream_id=session_stream("s1"),
             )
             db.close()
             payload = {"cwd": str(project), "session_id": "s1", "turn_id": "t1", "last_assistant_message": "Still working."}
@@ -423,6 +833,7 @@ class CoreTests(unittest.TestCase):
                 objective="Finish verification",
                 current_step="Step two",
                 next_action="Run second check",
+                stream_id=session_stream("s1"),
             )
             db.close()
             second = handle_hook("Stop", payload, codex_home=home)
@@ -449,7 +860,7 @@ class CoreTests(unittest.TestCase):
             )
             payload_project = project_from_payload({"cwd": str(project)})
             db = connect(home)
-            save_checkpoint(db, payload_project, objective="Finish verification", next_action="Run first check")
+            save_checkpoint(db, payload_project, objective="Finish verification", next_action="Run first check", stream_id=session_stream("s1"))
             db.close()
             first = handle_hook(
                 "Stop",
@@ -457,7 +868,7 @@ class CoreTests(unittest.TestCase):
                 codex_home=home,
             )
             db = connect(home)
-            save_checkpoint(db, payload_project, objective="Finish verification", next_action="Run second check")
+            save_checkpoint(db, payload_project, objective="Finish verification", next_action="Run second check", stream_id=session_stream("s1"))
             db.close()
             second = handle_hook(
                 "Stop",
@@ -481,7 +892,7 @@ class CoreTests(unittest.TestCase):
             )
             payload_project = project_from_payload({"cwd": str(project)})
             db = connect(home)
-            save_checkpoint(db, payload_project, objective="Finish verification", next_action="Run check")
+            save_checkpoint(db, payload_project, objective="Finish verification", next_action="Run check", stream_id=session_stream("s1"))
             db.close()
             out = handle_hook(
                 "Stop",
@@ -514,7 +925,7 @@ class CoreTests(unittest.TestCase):
             )
             payload_project = project_from_payload({"cwd": str(project)})
             db = connect(home)
-            save_checkpoint(db, payload_project, objective="Finish verification", next_action="Run check")
+            save_checkpoint(db, payload_project, objective="Finish verification", next_action="Run check", stream_id=session_stream("s1"))
             db.close()
             out = handle_hook(
                 "Stop",
@@ -824,6 +1235,7 @@ class CoreTests(unittest.TestCase):
                 blockers="Device locked",
                 tests_passed="Strong proof passed",
                 do_not_repeat="",
+                stream_id=session_stream("s1"),
             )
             db.close()
             for index in range(3):
@@ -874,7 +1286,7 @@ class CoreTests(unittest.TestCase):
             )
             project = project_from_payload({"cwd": str(project_path)})
             db = connect(home)
-            save_checkpoint(db, project, objective="Finish verification", next_action="Run check")
+            save_checkpoint(db, project, objective="Finish verification", next_action="Run check", stream_id=session_stream("s1"))
             db.close()
             out = handle_hook(
                 "Stop",

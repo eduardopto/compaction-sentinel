@@ -31,7 +31,7 @@ With Sentinel:
 Example packet excerpt:
 
 ```xml
-<compaction-sentinel version="0.4.6" schema="packet-v2" reason="session-start">
+<compaction-sentinel version="0.5.0" schema="packet-v2" reason="session-start">
   <active_objective>
   status: active
   objective: Finish auth repair and device verification
@@ -47,14 +47,19 @@ Example packet excerpt:
 
 ## What It Adds
 
-- User-level Codex hooks for the selected hook profile. The default `balanced` profile installs `SessionStart`, `UserPromptSubmit`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
+- User-level Codex hooks for the selected hook profile. The default `balanced` profile installs `SessionStart`, `UserPromptSubmit`, `PreCompact`, `PostCompact`, `PreToolUse`, `PermissionRequest`, `PostToolUse`, and `Stop`.
 - Packet v2: a ranked operating brief with authority, objective, acceptance criteria, current state, next action, do-not-repeat items, blockers, evidence, and recent trail.
 - A local SQLite ledger under `~/.codex/compaction-sentinel/`.
 - Runtime performance modes: `full`, `balanced` default, and `light`.
-- Install hook profiles: `full`/`balanced` install all hooks; `light` omits the hot `PreToolUse`/`PostToolUse` hooks and keeps startup, prompt, permission, Stop, skill, and MCP protection.
+- Install hook profiles: `full`/`balanced` install all hooks; `light` omits the hot `PreToolUse`/`PostToolUse` hooks and keeps startup, prompt, compact capture, permission, Stop, skill, and MCP protection.
+- Stream-aware isolation for multi-agent work in one repo. Each Codex session/workstream gets its own active checkpoint lane; peer streams appear as awareness only.
+- Native compaction compatibility: `PreCompact`/`PostCompact` capture snapshots and compact epochs, while `SessionStart(source="compact")` stays non-intrusive unless a real compact-context smoke gate is enabled.
+- Project-pollution quarantine: foreign/imported rows stay out of active packets, active checkpoints, loop warnings, and default search until explicitly claimed.
+- Staged `codex-context` migration with inspect-only dry runs, backups on apply, stable source keys, rollback metadata, and duplicate-injector repair.
 - MCP tools: `compaction_checkpoint`, `compaction_evidence_add`, `compaction_avoid_add`, `compaction_note`, `compaction_packet`, `compaction_search`, and `compaction_status`.
 - A strict MCP `cwd` contract so every tool call targets an explicit project.
 - CLI commands for checkpoints, evidence, avoid-list items, scrub/export, retention, config, backups, doctor repair, and uninstall.
+- Additional CLI commands: `migrate codex-context`, `compact status|audit`, `quarantine list|claim|release`, `memory-candidates`, and `stream list|claim|status|rename`.
 - A CLI-first skill contract for normal Codex Desktop work, so Full Access runs can write Sentinel checkpoints without using the separate MCP/plugin approval surface.
 - Replay evals for stale restarts, repeated failures, false-positive doc/source reads, objective changes, tool-output blindness, redaction, project switching, and Stop continuation loops.
 - Secret redaction for OpenAI keys, GitHub PATs, AWS keys, Google API keys, Slack tokens, JWTs, private keys, bearer tokens, env-style secrets, and high-entropy values.
@@ -107,6 +112,14 @@ Verify:
 codex mcp list
 ```
 
+Inspect a legacy `codex-context` install without writing anything:
+
+```bash
+~/.codex/bin/cs migrate codex-context --dry-run
+```
+
+Only `--apply`, install, and repair paths create backups or modify hooks/config.
+
 ## Seamless Full Access
 
 Codex Full Access covers shell/filesystem permissions. MCP/plugin tools can still show their own approval prompts in some Codex Desktop configurations. Sentinel keeps MCP available, but the installed skill now tells Codex to use the local CLI first for ordinary checkpoint, evidence, avoid-list, packet, and status writes:
@@ -153,6 +166,23 @@ Show the packet Codex will receive:
 ```bash
 ~/.codex/bin/cs packet --cwd "$PWD"
 ```
+
+## Multi-Agent Streams
+
+Single-agent users do not need a new workflow. Hooks derive a stream from the Codex session, and CLI calls inside Codex can use the current thread identity automatically.
+
+When multiple agents work in the same repo, Sentinel keeps each active checkpoint in its own stream. The packet treats only the current stream as active work. Other active streams can appear under `<peer_workstreams awareness="only">` and conflict warnings, but their next action is never used as the current next action.
+
+Helpful commands:
+
+```bash
+~/.codex/bin/cs stream claim --cwd "$PWD" --label "Phase 9B hearing perception"
+~/.codex/bin/cs stream status --cwd "$PWD"
+~/.codex/bin/cs stream list --cwd "$PWD"
+~/.codex/bin/cs packet --cwd "$PWD"
+```
+
+You can still use separate worktrees for code-merge hygiene, but Sentinel no longer requires a separate worktree just to avoid continuity drift between agents.
 
 When Codex uses the MCP tools, it must pass the active project `cwd` every time. Missing `cwd` fails clearly instead of silently writing state to the wrong project. For normal Full Access work, prefer the CLI examples above to avoid unnecessary MCP approval prompts.
 
@@ -252,7 +282,7 @@ python scripts/benchmark_hooks.py --quick
 python3 -m pip wheel . -w /tmp/compaction-sentinel-wheel
 ```
 
-Replay scenarios live in [tests/fixtures/scenarios](tests/fixtures/scenarios). They are the product contract: correct objective, correct next action, loop warning, redaction, packet budget, project isolation, and Stop-loop caps.
+Replay scenarios live in [tests/fixtures/scenarios](tests/fixtures/scenarios). They are the product contract: correct objective, correct next action, loop warning, redaction, packet budget, project isolation, multi-agent stream isolation, and Stop-loop caps.
 
 ## Documentation
 

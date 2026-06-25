@@ -57,6 +57,8 @@ class InstallTests(unittest.TestCase):
             self.assertEqual(status["hooks_profile"], "balanced")
             self.assertTrue(status["hooks_profile_matches"])
             self.assertTrue(status["hooks_by_event"]["PermissionRequest"])
+            self.assertTrue(status["hooks_by_event"]["PreCompact"])
+            self.assertTrue(status["hooks_by_event"]["PostCompact"])
             self.assertTrue(status["hooks_by_event"]["PreToolUse"])
             self.assertTrue(status["hooks_by_event"]["PostToolUse"])
             self.assertEqual(status["performance_mode"], "balanced")
@@ -74,6 +76,8 @@ class InstallTests(unittest.TestCase):
             self.assertNotIn("PostToolUse", [event for event, groups in hooks.items() if groups])
             self.assertTrue(hooks["SessionStart"])
             self.assertTrue(hooks["UserPromptSubmit"])
+            self.assertTrue(hooks["PreCompact"])
+            self.assertTrue(hooks["PostCompact"])
             self.assertTrue(hooks["PermissionRequest"])
             self.assertTrue(hooks["Stop"])
             status = doctor(codex_home=home)
@@ -82,7 +86,42 @@ class InstallTests(unittest.TestCase):
             self.assertTrue(status["hooks_profile_matches"])
             self.assertFalse(status["hooks_by_event"]["PreToolUse"])
             self.assertFalse(status["hooks_by_event"]["PostToolUse"])
+            self.assertTrue(status["hooks_by_event"]["PreCompact"])
+            self.assertTrue(status["hooks_by_event"]["PostCompact"])
             self.assertEqual(status["performance_mode"], "light")
+
+    def test_install_compact_hooks_use_manual_auto_matcher(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            install(source_root=source_root, codex_home=home, skills_target="codex")
+            hooks = json.loads((home / "hooks.json").read_text(encoding="utf-8"))["hooks"]
+            self.assertEqual(hooks["PreCompact"][0]["matcher"], "manual|auto")
+            self.assertEqual(hooks["PostCompact"][0]["matcher"], "manual|auto")
+
+    def test_doctor_reports_and_repairs_codex_context_competing_hooks(self) -> None:
+        source_root = Path(__file__).resolve().parents[1]
+        with tempfile.TemporaryDirectory() as tmp:
+            home = Path(tmp) / "codex"
+            install(source_root=source_root, codex_home=home, skills_target="codex")
+            data = json.loads((home / "hooks.json").read_text(encoding="utf-8"))
+            data["hooks"]["UserPromptSubmit"].append(
+                {
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"/usr/bin/python3 {home}/codex-context/codex_context.py hook UserPromptSubmit",
+                        }
+                    ]
+                }
+            )
+            (home / "hooks.json").write_text(json.dumps(data), encoding="utf-8")
+            status = doctor(codex_home=home)
+            self.assertTrue(status["competing_context_injectors"])
+            self.assertTrue(any("codex-context hook entries" in item for item in status["warnings"]))
+            fixed = doctor_fix(codex_home=home)
+            self.assertFalse(fixed["competing_context_injectors"])
+            self.assertTrue(any("replaced codex-context hooks" in item for item in fixed["fix_actions"]))
 
     def test_doctor_detects_and_repairs_hooks_profile_mismatch(self) -> None:
         source_root = Path(__file__).resolve().parents[1]

@@ -8,16 +8,23 @@ import json
 import os
 import platform
 import re
+import shutil
 import shlex
 import sqlite3
 import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
 
-VERSION = "0.4.6"
+VERSION = "0.5.0"
+SCHEMA_USER_VERSION = 500
 APP_NAME = "Compaction Sentinel"
+DEFAULT_STREAM_ID = "default"
+DEFAULT_SOURCE_SYSTEM = "compaction-sentinel"
+MAX_STREAM_ID_CHARS = 64
+MAX_STREAM_LABEL_CHARS = 120
 DEFAULT_MAX_PACKET_CHARS = 5000
 DEFAULT_LOOP_THRESHOLD = 3
 DEFAULT_RECENT_EVENT_LIMIT = 18
@@ -57,6 +64,8 @@ CHECKPOINT_TEXT_FIELDS = (
 )
 
 CHECKPOINT_EXTRA_COLUMNS = {
+    "stream_id": "TEXT NOT NULL DEFAULT 'default'",
+    "stream_label": "TEXT",
     "acceptance_criteria": "TEXT",
     "files_touched": "TEXT",
     "commands_run": "TEXT",
@@ -67,12 +76,37 @@ CHECKPOINT_EXTRA_COLUMNS = {
     "do_not_repeat": "TEXT",
     "last_verified_at": "TEXT",
     "confidence": "TEXT",
+    "compaction_epoch": "INTEGER NOT NULL DEFAULT 0",
+    "source_system": "TEXT",
+    "source_ref": "TEXT",
+    "foreign_project_hint": "TEXT",
+    "quarantine_reason": "TEXT",
+    "thread_id": "TEXT",
 }
 
 EVENT_EXTRA_COLUMNS = {
+    "stream_id": "TEXT NOT NULL DEFAULT 'default'",
+    "stream_label": "TEXT",
     "tool_use_id": "TEXT",
     "event_key": "TEXT",
     "category": "TEXT",
+    "compaction_epoch": "INTEGER NOT NULL DEFAULT 0",
+    "source_system": "TEXT",
+    "source_ref": "TEXT",
+    "foreign_project_hint": "TEXT",
+    "quarantine_reason": "TEXT",
+    "thread_id": "TEXT",
+}
+
+NOTE_EXTRA_COLUMNS = {
+    "stream_id": "TEXT NOT NULL DEFAULT 'default'",
+    "stream_label": "TEXT",
+    "compaction_epoch": "INTEGER NOT NULL DEFAULT 0",
+    "source_system": "TEXT",
+    "source_ref": "TEXT",
+    "foreign_project_hint": "TEXT",
+    "quarantine_reason": "TEXT",
+    "thread_id": "TEXT",
 }
 
 
@@ -80,6 +114,12 @@ EVENT_EXTRA_COLUMNS = {
 class Project:
     root: Path
     name: str
+
+
+@dataclass(frozen=True)
+class StreamScope:
+    id: str = DEFAULT_STREAM_ID
+    label: str = ""
 
 
 def utc_now() -> str:
@@ -127,6 +167,9 @@ def default_runtime_config() -> dict[str, Any]:
         "redact": True,
         "skills_target": "codex",
         "global_shim_bins": [],
+        "compact_hooks_capture_only": True,
+        "compact_context_smoke_passed": False,
+        "compact_resume_injection": False,
     }
 
 
@@ -227,6 +270,8 @@ def init_db(db: sqlite3.Connection) -> None:
           id INTEGER PRIMARY KEY,
           project_root TEXT NOT NULL,
           project_name TEXT NOT NULL,
+          stream_id TEXT NOT NULL DEFAULT 'default',
+          stream_label TEXT,
           session_id TEXT,
           turn_id TEXT,
           event_name TEXT NOT NULL,
@@ -238,6 +283,12 @@ def init_db(db: sqlite3.Connection) -> None:
           tool_use_id TEXT,
           event_key TEXT,
           outcome TEXT,
+          compaction_epoch INTEGER NOT NULL DEFAULT 0,
+          source_system TEXT,
+          source_ref TEXT,
+          foreign_project_hint TEXT,
+          quarantine_reason TEXT,
+          thread_id TEXT,
           created_at TEXT NOT NULL
         );
         CREATE INDEX IF NOT EXISTS idx_events_project_id
@@ -250,6 +301,8 @@ def init_db(db: sqlite3.Connection) -> None:
           id INTEGER PRIMARY KEY,
           project_root TEXT NOT NULL,
           project_name TEXT NOT NULL,
+          stream_id TEXT NOT NULL DEFAULT 'default',
+          stream_label TEXT,
           session_id TEXT,
           turn_id TEXT,
           status TEXT NOT NULL DEFAULT 'active',
@@ -268,6 +321,12 @@ def init_db(db: sqlite3.Connection) -> None:
           do_not_repeat TEXT,
           last_verified_at TEXT,
           confidence TEXT,
+          compaction_epoch INTEGER NOT NULL DEFAULT 0,
+          source_system TEXT,
+          source_ref TEXT,
+          foreign_project_hint TEXT,
+          quarantine_reason TEXT,
+          thread_id TEXT,
           source TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL,
@@ -282,9 +341,17 @@ def init_db(db: sqlite3.Connection) -> None:
           id INTEGER PRIMARY KEY,
           project_root TEXT NOT NULL,
           project_name TEXT NOT NULL,
+          stream_id TEXT NOT NULL DEFAULT 'default',
+          stream_label TEXT,
           status TEXT NOT NULL DEFAULT 'open',
           content TEXT NOT NULL,
           surface_condition TEXT,
+          compaction_epoch INTEGER NOT NULL DEFAULT 0,
+          source_system TEXT,
+          source_ref TEXT,
+          foreign_project_hint TEXT,
+          quarantine_reason TEXT,
+          thread_id TEXT,
           created_at TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
@@ -298,19 +365,73 @@ def init_db(db: sqlite3.Connection) -> None:
           value TEXT NOT NULL,
           updated_at TEXT NOT NULL
         );
+        CREATE TABLE IF NOT EXISTS memory_candidates (
+          id INTEGER PRIMARY KEY,
+          project_root TEXT NOT NULL,
+          project_name TEXT NOT NULL,
+          stream_id TEXT NOT NULL DEFAULT 'default',
+          stream_label TEXT,
+          content TEXT NOT NULL,
+          title TEXT,
+          tags TEXT,
+          importance TEXT,
+          source_system TEXT,
+          source_ref TEXT,
+          foreign_project_hint TEXT,
+          quarantine_reason TEXT,
+          thread_id TEXT,
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
         """
     )
     migrate_columns(db, "events", EVENT_EXTRA_COLUMNS)
     checkpoint_columns = {"completed_at": "TEXT", **CHECKPOINT_EXTRA_COLUMNS}
     migrate_columns(db, "checkpoints", checkpoint_columns)
+    migrate_columns(db, "notes", NOTE_EXTRA_COLUMNS)
+    db.executescript(
+        """
+        CREATE INDEX IF NOT EXISTS idx_events_project_stream_id
+          ON events(project_root, stream_id, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_checkpoints_project_stream_status
+          ON checkpoints(project_root, stream_id, status, id DESC);
+        CREATE INDEX IF NOT EXISTS idx_notes_project_stream_status
+          ON notes(project_root, stream_id, status, id DESC);
+        DROP INDEX IF EXISTS idx_events_project_event_key;
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_events_project_stream_event_key
+          ON events(project_root, stream_id, event_key)
+          WHERE event_key IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_events_project_stream_category_epoch_quarantine
+          ON events(project_root, stream_id, category, compaction_epoch, quarantine_reason, id DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_events_source_ref
+          ON events(source_system, source_ref)
+          WHERE source_system IS NOT NULL AND source_ref IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_checkpoints_project_stream_active_quarantine
+          ON checkpoints(project_root, stream_id, status, quarantine_reason, id DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_checkpoints_source_ref
+          ON checkpoints(source_system, source_ref)
+          WHERE source_system IS NOT NULL AND source_ref IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_notes_project_stream_quarantine
+          ON notes(project_root, stream_id, status, quarantine_reason, id DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_notes_source_ref
+          ON notes(source_system, source_ref)
+          WHERE source_system IS NOT NULL AND source_ref IS NOT NULL;
+        CREATE INDEX IF NOT EXISTS idx_memory_candidates_project_quarantine
+          ON memory_candidates(project_root, quarantine_reason, id DESC);
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_memory_candidates_source_ref
+          ON memory_candidates(source_system, source_ref)
+          WHERE source_system IS NOT NULL AND source_ref IS NOT NULL;
+        """
+    )
     db.execute(
         """
-        CREATE UNIQUE INDEX IF NOT EXISTS idx_events_project_event_key
-          ON events(project_root, event_key)
+        CREATE UNIQUE INDEX IF NOT EXISTS idx_events_project_stream_event_key
+          ON events(project_root, stream_id, event_key)
           WHERE event_key IS NOT NULL
         """
     )
     migrate_event_categories(db)
+    db.execute(f"PRAGMA user_version = {SCHEMA_USER_VERSION}")
     db.execute("PRAGMA busy_timeout=2000;")
     db.commit()
 
@@ -338,7 +459,6 @@ def migrate_event_categories(db: sqlite3.Connection) -> None:
         )
         if category != str(event["category"] or ""):
             db.execute("UPDATE events SET category = ? WHERE id = ?", (category, event["id"]))
-    db.execute("PRAGMA user_version = 4")
 
 
 def read_json_stdin() -> dict[str, Any]:
@@ -552,6 +672,174 @@ def hash_text(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8", errors="ignore")).hexdigest()
 
 
+def normalize_stream_id(value: Any) -> str:
+    raw = str(value or "").strip()
+    if not raw:
+        return DEFAULT_STREAM_ID
+    slug = re.sub(r"[^A-Za-z0-9:._-]+", "-", raw).strip(":._-").lower()
+    if not slug:
+        return "stream-" + hash_text(raw)[:16]
+    if len(slug) <= MAX_STREAM_ID_CHARS:
+        return slug
+    digest = hash_text(raw)[:16]
+    prefix = slug[: MAX_STREAM_ID_CHARS - len(digest) - 1].strip("._-") or "stream"
+    return f"{prefix}-{digest}"
+
+
+def normalize_stream_label(value: Any, *, redact: bool = True) -> str:
+    return normalize_text(value, MAX_STREAM_LABEL_CHARS, redact=redact)
+
+
+def coerce_stream(
+    stream_id: Any = None,
+    stream_label: Any = "",
+    *,
+    redact: bool = True,
+) -> StreamScope:
+    return StreamScope(
+        id=normalize_stream_id(stream_id),
+        label=normalize_stream_label(stream_label, redact=redact),
+    )
+
+
+def session_id_from_payload(payload: dict[str, Any]) -> str:
+    value = payload.get("session_id")
+    if isinstance(value, str) and value.strip():
+        return normalize_text(value, 200, redact=False)
+    return ""
+
+
+def thread_id_from_payload(payload: dict[str, Any]) -> str:
+    for key in ("thread_id", "codex_thread_id", "conversation_id"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return normalize_text(value, 200, redact=False)
+    return ""
+
+
+def transcript_path_from_payload(payload: dict[str, Any]) -> str:
+    for key in ("transcript_path", "conversation_path"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return normalize_text(value, 400, redact=False)
+    transcript = payload.get("transcript")
+    if isinstance(transcript, dict):
+        value = transcript.get("path")
+        if isinstance(value, str) and value.strip():
+            return normalize_text(value, 400, redact=False)
+    return ""
+
+
+def ambient_codex_session_id() -> str:
+    for key in ("CODEX_THREAD_ID", "CODEX_SESSION_ID", "CODEX_AGENT_ID"):
+        value = os.environ.get(key)
+        if value:
+            return normalize_text(value, 200, redact=False)
+    return ""
+
+
+def stream_session_key(project: Project, session_id: str) -> str:
+    return f"{project_state_prefix(project)}session_stream:{hash_text(session_id)[:24]}"
+
+
+def stream_transcript_key(project: Project, transcript_path: str) -> str:
+    return f"{project_state_prefix(project)}transcript_stream:{hash_text(transcript_path)[:24]}"
+
+
+def stream_label_key(project: Project, stream_id: str) -> str:
+    return f"{stream_state_prefix(project, stream_id)}label"
+
+
+def stream_owner_key(project: Project, stream_id: str) -> str:
+    return f"{stream_state_prefix(project, stream_id)}owner_session"
+
+
+def stream_state_prefix(project: Project, stream_id: str) -> str:
+    return f"{project_state_prefix(project)}stream:{normalize_stream_id(stream_id)}:"
+
+
+def remember_stream(
+    db: sqlite3.Connection,
+    project: Project,
+    stream: StreamScope,
+    *,
+    session_id: str = "",
+    transcript_path: str = "",
+) -> None:
+    if session_id:
+        set_state(db, stream_session_key(project, session_id), stream.id)
+    if transcript_path:
+        set_state(db, stream_transcript_key(project, transcript_path), stream.id)
+    if stream.label:
+        set_state(db, stream_label_key(project, stream.id), stream.label)
+
+
+def stream_from_payload(
+    payload: dict[str, Any],
+    project: Project,
+    config: dict[str, Any] | None = None,
+    db: sqlite3.Connection | None = None,
+) -> StreamScope:
+    del config
+    session_id = session_id_from_payload(payload)
+    transcript_path = transcript_path_from_payload(payload)
+    explicit = payload.get("stream_id") or payload.get("stream")
+    label = payload.get("stream_label") or payload.get("label") or ""
+    if explicit:
+        normalized = normalize_stream_id(explicit)
+        if db is not None and not label:
+            label = get_state(db, stream_label_key(project, normalized)) or ""
+        stream = coerce_stream(explicit, label)
+        if db is not None:
+            remember_stream(db, project, stream, session_id=session_id, transcript_path=transcript_path)
+        return stream
+
+    thread_id = thread_id_from_payload(payload)
+    if thread_id:
+        normalized = normalize_stream_id(thread_id)
+        if db is not None and not label:
+            label = get_state(db, stream_label_key(project, normalized)) or ""
+        stream = coerce_stream(thread_id, label)
+        if db is not None:
+            remember_stream(db, project, stream, session_id=session_id, transcript_path=transcript_path)
+        return stream
+
+    if db is not None and session_id:
+        mapped = get_state(db, stream_session_key(project, session_id))
+        if mapped:
+            stored_label = get_state(db, stream_label_key(project, mapped)) or label
+            return coerce_stream(mapped, stored_label)
+
+    if db is not None and transcript_path:
+        mapped = get_state(db, stream_transcript_key(project, transcript_path))
+        if mapped:
+            stored_label = get_state(db, stream_label_key(project, mapped)) or label
+            if session_id:
+                remember_stream(db, project, coerce_stream(mapped, stored_label), session_id=session_id)
+            return coerce_stream(mapped, stored_label)
+
+    if session_id:
+        stream = coerce_stream("session:" + hash_text(session_id)[:24], label)
+        if db is not None:
+            remember_stream(db, project, stream, session_id=session_id, transcript_path=transcript_path)
+        return stream
+    return coerce_stream(DEFAULT_STREAM_ID, label)
+
+
+def stream_from_cli_args(
+    args: Any,
+    project: Project,
+    config: dict[str, Any] | None = None,
+    db: sqlite3.Connection | None = None,
+) -> StreamScope:
+    payload = {
+        "stream_id": getattr(args, "stream", None),
+        "stream_label": getattr(args, "stream_label", ""),
+        "session_id": ambient_codex_session_id(),
+    }
+    return stream_from_payload(payload, project, config, db)
+
+
 def fingerprint(kind: str, summary: str) -> str:
     normalized = normalize_for_fingerprint(summary)
     return hash_text(f"{kind}:{normalized}")[:24]
@@ -587,9 +875,13 @@ def payload_cwd(payload: dict[str, Any]) -> Path:
 def find_project_root(start: Path) -> Path:
     current = start if start.is_dir() else start.parent
     current = current.expanduser().resolve()
-    markers = (".git", "pyproject.toml", "package.json", "Cargo.toml", "go.mod", ".codex", ".agents")
+    checkout_markers = (".git",)
     for candidate in [current, *current.parents]:
-        if any((candidate / marker).exists() for marker in markers):
+        if any((candidate / marker).exists() for marker in checkout_markers):
+            return candidate
+    fallback_markers = ("pyproject.toml", "package.json", "Cargo.toml", "go.mod", ".codex", ".agents")
+    for candidate in [current, *current.parents]:
+        if any((candidate / marker).exists() for marker in fallback_markers):
             return candidate
     return current
 
@@ -597,6 +889,207 @@ def find_project_root(start: Path) -> Path:
 def project_from_payload(payload: dict[str, Any]) -> Project:
     root = find_project_root(payload_cwd(payload))
     return Project(root=root, name=root.name or "workspace")
+
+
+ABSOLUTE_PATH_RE = re.compile(r"(?<![\w.-])/(?:Users|Volumes|private|tmp|var)/[^\s'\"`<>),;]+")
+ACTIVE_WORK_RE = re.compile(
+    r"(?i)\b("
+    r"active\s+work|working\s+in|implement|fix|edit|modify|write|create|delete|remove|"
+    r"apply_patch|commit|push|build|test|run|install|migrate|checkpoint|objective|next\s+action"
+    r")\b"
+)
+
+
+def path_within_project(path: Path, project: Project) -> bool:
+    try:
+        candidate = path.expanduser().resolve(strict=False)
+        root = project.root.expanduser().resolve(strict=False)
+        return os.path.commonpath([str(candidate), str(root)]) == str(root)
+    except Exception:
+        return False
+
+
+def clean_absolute_path(raw: str) -> str:
+    return raw.rstrip(".,:;)]}\"'")
+
+
+def absolute_paths_in_text(text: str) -> list[Path]:
+    paths: list[Path] = []
+    for match in ABSOLUTE_PATH_RE.findall(str(text or "")):
+        cleaned = clean_absolute_path(match)
+        if cleaned:
+            paths.append(Path(cleaned).expanduser())
+    return paths
+
+
+def iter_text_values(value: Any) -> Iterable[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from iter_text_values(item)
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from iter_text_values(item)
+
+
+def foreign_paths_from_value(value: Any, project: Project) -> list[Path]:
+    paths: list[Path] = []
+    for text in iter_text_values(value):
+        for path in absolute_paths_in_text(text):
+            if not path_within_project(path, project):
+                paths.append(path)
+    return paths
+
+
+def foreign_path_hint(paths: Iterable[Path], project: Project) -> str:
+    for path in paths:
+        try:
+            marker_root = find_project_root(path)
+        except Exception:
+            marker_root = path
+        if not path_within_project(marker_root, project):
+            return str(marker_root)
+    return ""
+
+
+def quarantine_reason_for_payload(
+    project: Project,
+    payload: dict[str, Any],
+    *,
+    summary: str = "",
+    details: dict[str, Any] | None = None,
+    event_name: str = "",
+    imported: bool = False,
+    ownership_proven: bool = False,
+) -> tuple[str, str]:
+    if imported and not ownership_proven:
+        paths = foreign_paths_from_value(payload, project) + foreign_paths_from_value(summary, project)
+        return foreign_path_hint(paths, project), "imported_owner_unproven"
+    checked_payload: dict[str, Any] = {}
+    for key in ("cwd", "project_path", "workspace_path", "transcript_path"):
+        if key in payload:
+            checked_payload[key] = payload[key]
+    workspace = payload.get("workspace")
+    if isinstance(workspace, dict):
+        checked_payload["workspace"] = workspace
+    explicit_paths = foreign_paths_from_value(checked_payload, project)
+    if explicit_paths:
+        return foreign_path_hint(explicit_paths, project), "foreign_project_hint"
+
+    text_blob = " ".join([summary, stringify_for_storage(details or {}), stringify_for_storage(payload)])
+    paths = foreign_paths_from_value(text_blob, project)
+    if not paths:
+        return "", ""
+    if event_name in {"PreToolUse", "PostToolUse"}:
+        command = extract_tool_input(payload, redact=False, limit=4000) or summary
+        if is_read_only_command(command) and not ACTIVE_WORK_RE.search(text_blob):
+            return "", ""
+    inside_count = sum(1 for path in absolute_paths_in_text(text_blob) if path_within_project(path, project))
+    if ACTIVE_WORK_RE.search(text_blob) or len(paths) > inside_count:
+        return foreign_path_hint(paths, project), "foreign_active_work"
+    return "", ""
+
+
+def compact_epoch_key(project: Project, stream_id: str) -> str:
+    return f"{stream_state_prefix(project, stream_id)}compaction_epoch"
+
+
+def current_compaction_epoch(db: sqlite3.Connection, project: Project, stream_id: str) -> int:
+    try:
+        return int(get_state(db, compact_epoch_key(project, stream_id)) or "0")
+    except ValueError:
+        return 0
+
+
+def set_compaction_epoch(db: sqlite3.Connection, project: Project, stream_id: str, epoch: int) -> int:
+    value = max(0, int(epoch))
+    set_state(db, compact_epoch_key(project, stream_id), str(value))
+    return value
+
+
+def advance_compaction_epoch(db: sqlite3.Connection, project: Project, stream_id: str) -> int:
+    return set_compaction_epoch(db, project, stream_id, current_compaction_epoch(db, project, stream_id) + 1)
+
+
+def compact_context_enabled(config: dict[str, Any]) -> bool:
+    return bool(config.get("compact_context_smoke_passed")) and bool(config.get("compact_resume_injection"))
+
+
+def table_name_checked(table: str) -> str:
+    if table not in {"events", "checkpoints", "notes", "memory_candidates"}:
+        raise ValueError(f"unsupported quarantine table: {table}")
+    return table
+
+
+def quarantine_count(
+    db: sqlite3.Connection,
+    project: Project | None = None,
+    *,
+    stream_id: str | None = None,
+) -> int:
+    total = 0
+    for table in ("events", "checkpoints", "notes", "memory_candidates"):
+        clauses = ["quarantine_reason IS NOT NULL", "quarantine_reason != ''"]
+        params: list[Any] = []
+        if project is not None:
+            clauses.append("project_root = ?")
+            params.append(str(project.root))
+        if stream_id is not None and table != "memory_candidates":
+            clauses.append("stream_id = ?")
+            params.append(normalize_stream_id(stream_id))
+        row = db.execute(
+            f"SELECT COUNT(*) AS count FROM {table} WHERE {' AND '.join(clauses)}",
+            params,
+        ).fetchone()
+        total += int(row["count"] if row else 0)
+    return total
+
+
+def list_quarantine(
+    db: sqlite3.Connection,
+    project: Project | None = None,
+    *,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    rows: list[dict[str, Any]] = []
+    for table in ("checkpoints", "notes", "events", "memory_candidates"):
+        clauses = ["quarantine_reason IS NOT NULL", "quarantine_reason != ''"]
+        params: list[Any] = []
+        if project is not None:
+            clauses.append("project_root = ?")
+            params.append(str(project.root))
+        for row in db.execute(
+            f"""
+            SELECT * FROM {table}
+            WHERE {' AND '.join(clauses)}
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (*params, limit),
+        ).fetchall():
+            item = dict(row)
+            item["table"] = table
+            rows.append(item)
+    rows.sort(key=lambda item: int(item.get("id") or 0), reverse=True)
+    return rows[:limit]
+
+
+def set_quarantine(
+    db: sqlite3.Connection,
+    table: str,
+    row_id: int,
+    *,
+    reason: str | None,
+    foreign_project_hint: str | None = None,
+) -> bool:
+    table = table_name_checked(table)
+    result = db.execute(
+        f"UPDATE {table} SET quarantine_reason = ?, foreign_project_hint = ? WHERE id = ?",
+        (reason or None, foreign_project_hint or None, int(row_id)),
+    )
+    db.commit()
+    return result.rowcount > 0
 
 
 def get_nested(payload: dict[str, Any], *keys: str) -> Any:
@@ -715,6 +1208,8 @@ def event_identity(payload: dict[str, Any], event_name: str) -> tuple[str, str]:
 
 def event_category(event_name: str, kind: str, summary: str, outcome: str | None = None) -> str:
     lowered = summary.lower()
+    if event_name in {"PreCompact", "PostCompact"}:
+        return "compact"
     if event_name == "PermissionRequest":
         return "permission_request"
     if event_name == "UserPromptSubmit":
@@ -964,16 +1459,46 @@ def record_event(
     retention_days: int = DEFAULT_RETENTION_DAYS,
     retention_check_interval_seconds: int = DEFAULT_RETENTION_CHECK_INTERVAL_SECONDS,
     prune_check_interval_events: int = DEFAULT_PRUNE_CHECK_INTERVAL_EVENTS,
+    stream: StreamScope | None = None,
+    compaction_epoch: int | None = None,
+    source_system: str = DEFAULT_SOURCE_SYSTEM,
+    source_ref: str = "",
+    foreign_project_hint: str = "",
+    quarantine_reason: str = "",
+    thread_id: str = "",
+    imported: bool = False,
+    ownership_proven: bool = False,
 ) -> sqlite3.Row:
+    stream = stream or stream_from_payload(payload, project, db=db)
     clean_summary = normalize_text(summary, 4000, redact=redact)
     clean_details = sanitize_json(details or {}, redact=redact)
     now = utc_now()
     tool_use_id, event_key = event_identity(payload, event_name)
+    if event_key:
+        event_key = hash_text(f"{stream.id}:{event_key}")[:40]
     fp = fingerprint(kind, clean_summary) if clean_summary else None
     category = event_category(event_name, kind, clean_summary, outcome)
+    if compaction_epoch is None:
+        compaction_epoch = current_compaction_epoch(db, project, stream.id)
+    if not thread_id:
+        thread_id = thread_id_from_payload(payload)
+    if not quarantine_reason:
+        detected_hint, detected_reason = quarantine_reason_for_payload(
+            project,
+            payload,
+            summary=clean_summary,
+            details=clean_details if isinstance(clean_details, dict) else {},
+            event_name=event_name,
+            imported=imported,
+            ownership_proven=ownership_proven,
+        )
+        foreign_project_hint = foreign_project_hint or detected_hint
+        quarantine_reason = detected_reason
     params = (
         str(project.root),
         project.name,
+        stream.id,
+        stream.label or None,
         str(payload.get("session_id") or ""),
         str(payload.get("turn_id") or ""),
         event_name,
@@ -985,22 +1510,34 @@ def record_event(
         tool_use_id or None,
         event_key or None,
         outcome,
+        int(compaction_epoch or 0),
+        normalize_text(source_system, 120, redact=False) or None,
+        normalize_text(source_ref, 300, redact=False) or None,
+        normalize_text(foreign_project_hint, 500, redact=False) or None,
+        normalize_text(quarantine_reason, 300, redact=False) or None,
+        normalize_text(thread_id, 300, redact=False) or None,
         now,
     )
     db.execute(
         """
         INSERT OR IGNORE INTO events
-          (project_root, project_name, session_id, turn_id, event_name, kind, category,
-           summary, details_json, fingerprint, tool_use_id, event_key, outcome, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          (project_root, project_name, stream_id, stream_label, session_id, turn_id, event_name, kind, category,
+           summary, details_json, fingerprint, tool_use_id, event_key, outcome, compaction_epoch,
+           source_system, source_ref, foreign_project_hint, quarantine_reason, thread_id, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         params,
     )
     db.commit()
-    if event_key:
+    if source_system and source_ref:
         row = db.execute(
-            "SELECT * FROM events WHERE project_root = ? AND event_key = ? ORDER BY id DESC LIMIT 1",
-            (str(project.root), event_key),
+            "SELECT * FROM events WHERE source_system = ? AND source_ref = ? ORDER BY id DESC LIMIT 1",
+            (normalize_text(source_system, 120, redact=False), normalize_text(source_ref, 300, redact=False)),
+        ).fetchone()
+    elif event_key:
+        row = db.execute(
+            "SELECT * FROM events WHERE project_root = ? AND stream_id = ? AND event_key = ? ORDER BY id DESC LIMIT 1",
+            (str(project.root), stream.id, event_key),
         ).fetchone()
     else:
         row = db.execute("SELECT * FROM events WHERE id = last_insert_rowid()").fetchone()
@@ -1159,23 +1696,40 @@ def save_checkpoint(
     session_id: str = "",
     turn_id: str = "",
     redact: bool = True,
+    stream: StreamScope | None = None,
+    stream_id: str | None = None,
+    stream_label: str = "",
+    compaction_epoch: int | None = None,
+    source_system: str = DEFAULT_SOURCE_SYSTEM,
+    source_ref: str = "",
+    foreign_project_hint: str = "",
+    quarantine_reason: str = "",
+    thread_id: str = "",
+    imported: bool = False,
+    ownership_proven: bool = False,
 ) -> int:
+    stream = stream or coerce_stream(stream_id, stream_label, redact=redact)
+    if session_id or stream.label:
+        remember_stream(db, project, stream, session_id=session_id)
     clean_objective = normalize_text(objective, 1400, redact=redact)
     if not clean_objective:
         raise ValueError("checkpoint objective is required")
+    if source_system and source_ref:
+        existing = db.execute(
+            "SELECT id FROM checkpoints WHERE source_system = ? AND source_ref = ? ORDER BY id DESC LIMIT 1",
+            (normalize_text(source_system, 120, redact=False), normalize_text(source_ref, 300, redact=False)),
+        ).fetchone()
+        if existing:
+            return int(existing["id"])
     now = utc_now()
     clean_status = normalize_text(status, 80, redact=redact) or "active"
     if clean_status not in {"active", "blocked", "complete", "superseded"}:
         clean_status = "active"
+    if compaction_epoch is None:
+        compaction_epoch = current_compaction_epoch(db, project, stream.id)
+    if not thread_id:
+        thread_id = normalize_text("", 1)
     close_status = "complete" if clean_status == "complete" else "superseded"
-    db.execute(
-        """
-        UPDATE checkpoints
-        SET status = ?, completed_at = COALESCE(completed_at, ?), updated_at = ?
-        WHERE project_root = ? AND status IN ('active', 'blocked')
-        """,
-        (close_status, now, now, str(project.root)),
-    )
     normalized_fields = {
         "acceptance_criteria": normalize_text(acceptance_criteria, 2400, redact=redact),
         "current_step": normalize_text(current_step, 1400, redact=redact),
@@ -1192,23 +1746,46 @@ def save_checkpoint(
         "last_verified_at": normalize_text(last_verified_at, 200, redact=redact),
         "confidence": normalize_text(confidence, 80, redact=redact),
     }
+    if not quarantine_reason:
+        detected_hint, detected_reason = quarantine_reason_for_payload(
+            project,
+            {"session_id": session_id, "thread_id": thread_id},
+            summary=" ".join([clean_objective, *normalized_fields.values()]),
+            imported=imported,
+            ownership_proven=ownership_proven,
+        )
+        foreign_project_hint = foreign_project_hint or detected_hint
+        quarantine_reason = detected_reason
+    if not quarantine_reason:
+        db.execute(
+            """
+            UPDATE checkpoints
+            SET status = ?, completed_at = COALESCE(completed_at, ?), updated_at = ?
+            WHERE project_root = ? AND stream_id = ? AND status IN ('active', 'blocked')
+              AND (quarantine_reason IS NULL OR quarantine_reason = '')
+            """,
+            (close_status, now, now, str(project.root), stream.id),
+        )
     if not normalized_fields["last_verified_at"] and (
         normalized_fields["evidence"] or normalized_fields["tests_passed"]
     ):
         normalized_fields["last_verified_at"] = now
     db.execute(
         """
-        INSERT INTO checkpoints
-          (project_root, project_name, session_id, turn_id, status, objective,
+        INSERT OR IGNORE INTO checkpoints
+          (project_root, project_name, stream_id, stream_label, session_id, turn_id, status, objective,
            acceptance_criteria, current_step, next_action, blockers, evidence,
            files_touched, commands_run, tests_passed, tests_failed, decisions_made,
-           assumptions, do_not_repeat, last_verified_at, confidence, source,
+           assumptions, do_not_repeat, last_verified_at, confidence, compaction_epoch,
+           source_system, source_ref, foreign_project_hint, quarantine_reason, thread_id, source,
            created_at, updated_at, completed_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(project.root),
             project.name,
+            stream.id,
+            stream.label or None,
             session_id,
             turn_id,
             clean_status,
@@ -1227,6 +1804,12 @@ def save_checkpoint(
             normalized_fields["do_not_repeat"],
             normalized_fields["last_verified_at"],
             normalized_fields["confidence"],
+            int(compaction_epoch or 0),
+            normalize_text(source_system, 120, redact=False) or None,
+            normalize_text(source_ref, 300, redact=False) or None,
+            normalize_text(foreign_project_hint, 500, redact=False) or None,
+            normalize_text(quarantine_reason, 300, redact=False) or None,
+            normalize_text(thread_id, 300, redact=False) or None,
             source,
             now,
             now,
@@ -1234,36 +1817,230 @@ def save_checkpoint(
         ),
     )
     db.commit()
-    row = db.execute("SELECT last_insert_rowid() AS id").fetchone()
+    if source_system and source_ref:
+        row = db.execute(
+            "SELECT id FROM checkpoints WHERE source_system = ? AND source_ref = ? ORDER BY id DESC LIMIT 1",
+            (normalize_text(source_system, 120, redact=False), normalize_text(source_ref, 300, redact=False)),
+        ).fetchone()
+    else:
+        row = db.execute("SELECT last_insert_rowid() AS id").fetchone()
     return int(row["id"])
 
 
-def latest_checkpoint(db: sqlite3.Connection, project: Project) -> sqlite3.Row | None:
+def resolve_checkpoint_stream(
+    db: sqlite3.Connection,
+    project: Project,
+    stream_id: str | None,
+    *,
+    include_inactive: bool = False,
+) -> str:
+    if stream_id is not None:
+        return normalize_stream_id(stream_id)
+    status_clause = "" if include_inactive else "AND status IN ('active', 'blocked')"
+    rows = db.execute(
+        f"""
+        SELECT DISTINCT stream_id
+        FROM checkpoints
+        WHERE project_root = ? {status_clause}
+          AND (quarantine_reason IS NULL OR quarantine_reason = '')
+        ORDER BY id DESC
+        LIMIT 2
+        """,
+        (str(project.root),),
+    ).fetchall()
+    if len(rows) == 1:
+        return normalize_stream_id(rows[0]["stream_id"])
+    if not rows:
+        existing = single_existing_stream_id(db, project)
+        if existing:
+            return existing
+    return DEFAULT_STREAM_ID
+
+
+def latest_checkpoint(
+    db: sqlite3.Connection,
+    project: Project,
+    stream_id: str | None = None,
+) -> sqlite3.Row | None:
+    resolved = resolve_checkpoint_stream(db, project, stream_id, include_inactive=True)
     return db.execute(
         """
         SELECT * FROM checkpoints
-        WHERE project_root = ?
+        WHERE project_root = ? AND stream_id = ?
+          AND (quarantine_reason IS NULL OR quarantine_reason = '')
         ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'blocked' THEN 1 ELSE 2 END, id DESC
         LIMIT 1
         """,
-        (str(project.root),),
+        (str(project.root), resolved),
     ).fetchone()
 
 
-def active_checkpoint(db: sqlite3.Connection, project: Project) -> sqlite3.Row | None:
+def active_checkpoint(
+    db: sqlite3.Connection,
+    project: Project,
+    stream_id: str | None = None,
+) -> sqlite3.Row | None:
+    resolved = resolve_checkpoint_stream(db, project, stream_id)
     return db.execute(
         """
         SELECT * FROM checkpoints
-        WHERE project_root = ? AND status IN ('active', 'blocked')
+        WHERE project_root = ? AND stream_id = ? AND status IN ('active', 'blocked')
+          AND (quarantine_reason IS NULL OR quarantine_reason = '')
         ORDER BY id DESC
         LIMIT 1
         """,
-        (str(project.root),),
+        (str(project.root), resolved),
     ).fetchone()
 
 
 def checkpoint_to_dict(row: sqlite3.Row | None) -> dict[str, Any] | None:
     return dict(row) if row else None
+
+
+def single_existing_stream_id(db: sqlite3.Connection, project: Project) -> str | None:
+    rows = db.execute(
+        """
+        SELECT stream_id, MAX(id) AS last_id
+        FROM (
+          SELECT stream_id, id FROM checkpoints
+          WHERE project_root = ? AND status IN ('active', 'blocked')
+            AND (quarantine_reason IS NULL OR quarantine_reason = '')
+          UNION ALL
+          SELECT stream_id, id FROM events
+          WHERE project_root = ?
+            AND (quarantine_reason IS NULL OR quarantine_reason = '')
+          UNION ALL
+          SELECT stream_id, id FROM notes
+          WHERE project_root = ? AND status = 'open'
+            AND (quarantine_reason IS NULL OR quarantine_reason = '')
+        )
+        GROUP BY stream_id
+        ORDER BY last_id DESC
+        LIMIT 2
+        """,
+        (str(project.root), str(project.root), str(project.root)),
+    ).fetchall()
+    if len(rows) == 1:
+        return normalize_stream_id(rows[0]["stream_id"])
+    return None
+
+
+def checkpoint_file_set(checkpoint: sqlite3.Row | dict[str, Any] | None) -> set[str]:
+    if not checkpoint:
+        return set()
+    raw = str(checkpoint["files_touched"] if isinstance(checkpoint, sqlite3.Row) else checkpoint.get("files_touched") or "")
+    files: set[str] = set()
+    for part in re.split(r"[\n,]", raw):
+        item = part.strip().strip("- ").strip()
+        if item:
+            files.add(item)
+    return files
+
+
+def checkpoint_subsystems(checkpoint: sqlite3.Row | dict[str, Any] | None) -> set[str]:
+    subsystems: set[str] = set()
+    for path in checkpoint_file_set(checkpoint):
+        pieces = [piece for piece in re.split(r"[\\/]+", path) if piece and piece not in {".", ".."}]
+        if pieces:
+            subsystems.add("/".join(pieces[:2]))
+    return subsystems
+
+
+def active_peer_checkpoints(
+    db: sqlite3.Connection,
+    project: Project,
+    stream_id: str,
+    *,
+    limit: int = 8,
+) -> list[sqlite3.Row]:
+    return db.execute(
+        """
+        SELECT * FROM checkpoints
+        WHERE project_root = ?
+          AND stream_id != ?
+          AND status IN ('active', 'blocked')
+          AND (quarantine_reason IS NULL OR quarantine_reason = '')
+        ORDER BY updated_at DESC, id DESC
+        LIMIT ?
+        """,
+        (str(project.root), normalize_stream_id(stream_id), limit),
+    ).fetchall()
+
+
+def stream_summary(row: sqlite3.Row) -> dict[str, Any]:
+    files = sorted(checkpoint_file_set(row))
+    return {
+        "stream_id": row["stream_id"],
+        "stream_label": row["stream_label"] or "",
+        "status": row["status"],
+        "objective": normalize_text(row["objective"], 260, redact=False),
+        "updated_at": row["updated_at"],
+        "files_touched": ", ".join(files[:6]),
+    }
+
+
+def list_streams(db: sqlite3.Connection, project: Project) -> list[dict[str, Any]]:
+    rows = db.execute(
+        """
+        SELECT *
+        FROM checkpoints
+        WHERE project_root = ?
+          AND (quarantine_reason IS NULL OR quarantine_reason = '')
+        ORDER BY CASE status WHEN 'active' THEN 0 WHEN 'blocked' THEN 1 ELSE 2 END,
+                 updated_at DESC,
+                 id DESC
+        """,
+        (str(project.root),),
+    ).fetchall()
+    seen: set[str] = set()
+    streams: list[dict[str, Any]] = []
+    for row in rows:
+        stream_id = normalize_stream_id(row["stream_id"])
+        if stream_id in seen:
+            continue
+        seen.add(stream_id)
+        streams.append(stream_summary(row))
+    return streams
+
+
+def same_objective_fingerprint(left: str, right: str) -> bool:
+    return hash_text(normalize_for_fingerprint(left))[:18] == hash_text(normalize_for_fingerprint(right))[:18]
+
+
+def peer_conflict_warnings(
+    db: sqlite3.Connection,
+    project: Project,
+    stream_id: str,
+    *,
+    checkpoint: sqlite3.Row | None = None,
+) -> list[str]:
+    current = checkpoint or active_checkpoint(db, project, stream_id=stream_id)
+    if current is None:
+        return []
+    current_files = checkpoint_file_set(current)
+    current_subsystems = checkpoint_subsystems(current)
+    current_objective = str(current["objective"] or "")
+    warnings: list[str] = []
+    for peer in active_peer_checkpoints(db, project, stream_id, limit=12):
+        label = str(peer["stream_label"] or peer["stream_id"])
+        peer_files = checkpoint_file_set(peer)
+        overlap = sorted(current_files & peer_files)
+        if overlap:
+            warnings.append(
+                f"Peer stream '{label}' also touches {', '.join(overlap[:4])}; coordinate before editing those files."
+            )
+            continue
+        if same_objective_fingerprint(current_objective, str(peer["objective"] or "")):
+            warnings.append(
+                f"Peer stream '{label}' has a similar active objective; keep this stream's checkpoint authoritative."
+            )
+            continue
+        shared_subsystems = sorted(current_subsystems & checkpoint_subsystems(peer))
+        if shared_subsystems:
+            warnings.append(
+                f"Peer stream '{label}' recently touches the same subsystem ({', '.join(shared_subsystems[:3])}); awareness only."
+            )
+    return dedupe_keep_order(warnings)[:5]
 
 
 def update_checkpoint_from_prompt(
@@ -1273,11 +2050,13 @@ def update_checkpoint_from_prompt(
     prompt: str,
     *,
     redact: bool = True,
+    stream: StreamScope | None = None,
 ) -> int | None:
     objective = infer_objective(prompt)
     if not objective:
         return None
-    current = active_checkpoint(db, project)
+    stream = stream or stream_from_payload(payload, project, db=db)
+    current = active_checkpoint(db, project, stream_id=stream.id)
     if current and normalize_text(current["objective"], 900, redact=redact) == normalize_text(
         objective, 900, redact=redact
     ):
@@ -1294,6 +2073,7 @@ def update_checkpoint_from_prompt(
         session_id=str(payload.get("session_id") or ""),
         turn_id=str(payload.get("turn_id") or ""),
         redact=redact,
+        stream=stream,
     )
 
 
@@ -1305,29 +2085,71 @@ def save_note(
     surface_condition: str = "",
     status: str = "open",
     redact: bool = True,
+    stream: StreamScope | None = None,
+    stream_id: str | None = None,
+    stream_label: str = "",
+    compaction_epoch: int | None = None,
+    source_system: str = DEFAULT_SOURCE_SYSTEM,
+    source_ref: str = "",
+    foreign_project_hint: str = "",
+    quarantine_reason: str = "",
+    thread_id: str = "",
+    imported: bool = False,
+    ownership_proven: bool = False,
 ) -> int:
+    stream = stream or coerce_stream(stream_id, stream_label, redact=redact)
+    if stream.label:
+        remember_stream(db, project, stream)
     clean_content = normalize_text(content, 3000, redact=redact)
     if not clean_content:
         raise ValueError("note content is required")
     now = utc_now()
+    if compaction_epoch is None:
+        compaction_epoch = current_compaction_epoch(db, project, stream.id)
+    if not quarantine_reason:
+        detected_hint, detected_reason = quarantine_reason_for_payload(
+            project,
+            {"thread_id": thread_id},
+            summary=clean_content + " " + surface_condition,
+            imported=imported,
+            ownership_proven=ownership_proven,
+        )
+        foreign_project_hint = foreign_project_hint or detected_hint
+        quarantine_reason = detected_reason
     db.execute(
         """
-        INSERT INTO notes
-          (project_root, project_name, status, content, surface_condition, created_at, updated_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        INSERT OR IGNORE INTO notes
+          (project_root, project_name, stream_id, stream_label, status, content, surface_condition,
+           compaction_epoch, source_system, source_ref, foreign_project_hint, quarantine_reason, thread_id,
+           created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
             str(project.root),
             project.name,
+            stream.id,
+            stream.label or None,
             normalize_text(status, 80, redact=redact) or "open",
             clean_content,
             normalize_text(surface_condition, 1000, redact=redact),
+            int(compaction_epoch or 0),
+            normalize_text(source_system, 120, redact=False) or None,
+            normalize_text(source_ref, 300, redact=False) or None,
+            normalize_text(foreign_project_hint, 500, redact=False) or None,
+            normalize_text(quarantine_reason, 300, redact=False) or None,
+            normalize_text(thread_id, 300, redact=False) or None,
             now,
             now,
         ),
     )
     db.commit()
-    row = db.execute("SELECT last_insert_rowid() AS id").fetchone()
+    if source_system and source_ref:
+        row = db.execute(
+            "SELECT id FROM notes WHERE source_system = ? AND source_ref = ? ORDER BY id DESC LIMIT 1",
+            (normalize_text(source_system, 120, redact=False), normalize_text(source_ref, 300, redact=False)),
+        ).fetchone()
+    else:
+        row = db.execute("SELECT last_insert_rowid() AS id").fetchone()
     return int(row["id"])
 
 
@@ -1339,15 +2161,21 @@ def append_checkpoint_field(
     value: str,
     objective: str | None = None,
     redact: bool = True,
+    stream: StreamScope | None = None,
+    stream_id: str | None = None,
+    stream_label: str = "",
 ) -> int:
+    stream = stream or coerce_stream(stream_id, stream_label, redact=redact)
+    if stream.label:
+        remember_stream(db, project, stream)
     if field not in CHECKPOINT_TEXT_FIELDS:
         raise ValueError(f"unsupported checkpoint field: {field}")
-    checkpoint = active_checkpoint(db, project)
+    checkpoint = active_checkpoint(db, project, stream_id=stream.id)
     if checkpoint is None:
         if not objective:
             raise ValueError("no active checkpoint; pass objective or create a checkpoint first")
-        checkpoint_id = save_checkpoint(db, project, objective=objective, redact=redact)
-        checkpoint = active_checkpoint(db, project)
+        checkpoint_id = save_checkpoint(db, project, objective=objective, redact=redact, stream=stream)
+        checkpoint = active_checkpoint(db, project, stream_id=stream.id)
         if checkpoint is None:
             return checkpoint_id
     clean_value = normalize_text(value, 1800, redact=redact)
@@ -1373,29 +2201,41 @@ def append_line(existing: str, new_value: str) -> str:
 
 
 def recent_events(
-    db: sqlite3.Connection, project: Project, limit: int = DEFAULT_RECENT_EVENT_LIMIT
+    db: sqlite3.Connection,
+    project: Project,
+    limit: int = DEFAULT_RECENT_EVENT_LIMIT,
+    stream_id: str | None = None,
 ) -> list[sqlite3.Row]:
+    resolved = resolve_checkpoint_stream(db, project, stream_id, include_inactive=True)
     rows = db.execute(
         """
         SELECT * FROM events
-        WHERE project_root = ?
+        WHERE project_root = ? AND stream_id = ?
+          AND (quarantine_reason IS NULL OR quarantine_reason = '')
         ORDER BY id DESC
         LIMIT ?
         """,
-        (str(project.root), limit),
+        (str(project.root), resolved, limit),
     ).fetchall()
     return list(reversed(rows))
 
 
-def recent_notes(db: sqlite3.Connection, project: Project, limit: int = 5) -> list[sqlite3.Row]:
+def recent_notes(
+    db: sqlite3.Connection,
+    project: Project,
+    limit: int = 5,
+    stream_id: str | None = None,
+) -> list[sqlite3.Row]:
+    resolved = resolve_checkpoint_stream(db, project, stream_id, include_inactive=True)
     return db.execute(
         """
         SELECT * FROM notes
-        WHERE project_root = ? AND status = 'open'
+        WHERE project_root = ? AND stream_id = ? AND status = 'open'
+          AND (quarantine_reason IS NULL OR quarantine_reason = '')
         ORDER BY id DESC
         LIMIT ?
         """,
-        (str(project.root), limit),
+        (str(project.root), resolved, limit),
     ).fetchall()
 
 
@@ -1403,6 +2243,7 @@ def loop_warnings(
     db: sqlite3.Connection,
     project: Project,
     *,
+    stream_id: str | None = None,
     fingerprint_value: str | None = None,
     threshold: int = DEFAULT_LOOP_THRESHOLD,
     include_failure_loop: bool = True,
@@ -1412,15 +2253,16 @@ def loop_warnings(
     warnings = repeat_warnings(
         db,
         project,
+        stream_id=stream_id,
         fingerprint_value=fingerprint_value,
         threshold=threshold,
     )
     if include_failure_loop:
-        warnings.extend(failure_loop_warnings(db, project, threshold=threshold))
+        warnings.extend(failure_loop_warnings(db, project, stream_id=stream_id, threshold=threshold))
     if include_investigation_loop:
-        warnings.extend(investigation_loop_warnings(db, project, threshold=max(threshold + 1, 4)))
+        warnings.extend(investigation_loop_warnings(db, project, stream_id=stream_id, threshold=max(threshold + 1, 4)))
     if include_tool_output_blindness:
-        warnings.extend(tool_output_blindness_warnings(db, project))
+        warnings.extend(tool_output_blindness_warnings(db, project, stream_id=stream_id))
     return dedupe_keep_order(warnings)[:8]
 
 
@@ -1428,12 +2270,14 @@ def repeat_warnings(
     db: sqlite3.Connection,
     project: Project,
     *,
+    stream_id: str | None = None,
     fingerprint_value: str | None = None,
     threshold: int = DEFAULT_LOOP_THRESHOLD,
 ) -> list[str]:
     warnings: list[str] = []
-    clauses = ["project_root = ?", "fingerprint IS NOT NULL"]
-    params: list[Any] = [str(project.root)]
+    resolved = resolve_checkpoint_stream(db, project, stream_id, include_inactive=True)
+    clauses = ["project_root = ?", "stream_id = ?", "fingerprint IS NOT NULL"]
+    params: list[Any] = [str(project.root), resolved]
     if fingerprint_value:
         clauses.append("fingerprint = ?")
         params.append(fingerprint_value)
@@ -1443,6 +2287,7 @@ def repeat_warnings(
         FROM (
           SELECT * FROM events
           WHERE {" AND ".join(clauses)}
+            AND (quarantine_reason IS NULL OR quarantine_reason = '')
           ORDER BY id DESC
           LIMIT 80
         )
@@ -1477,16 +2322,22 @@ def warning_label(category: str) -> str:
 
 
 def failure_loop_warnings(
-    db: sqlite3.Connection, project: Project, *, threshold: int = DEFAULT_LOOP_THRESHOLD
+    db: sqlite3.Connection,
+    project: Project,
+    *,
+    stream_id: str | None = None,
+    threshold: int = DEFAULT_LOOP_THRESHOLD,
 ) -> list[str]:
+    resolved = resolve_checkpoint_stream(db, project, stream_id, include_inactive=True)
     rows = db.execute(
         """
         SELECT * FROM events
-        WHERE project_root = ? AND event_name = 'PostToolUse'
+        WHERE project_root = ? AND stream_id = ? AND event_name = 'PostToolUse'
+          AND (quarantine_reason IS NULL OR quarantine_reason = '')
         ORDER BY id DESC
         LIMIT 80
         """,
-        (str(project.root),),
+        (str(project.root), resolved),
     ).fetchall()
     buckets: dict[str, list[sqlite3.Row]] = {}
     for row in rows:
@@ -1514,16 +2365,22 @@ def failure_signature(summary: str) -> str:
 
 
 def investigation_loop_warnings(
-    db: sqlite3.Connection, project: Project, *, threshold: int = 4
+    db: sqlite3.Connection,
+    project: Project,
+    *,
+    stream_id: str | None = None,
+    threshold: int = 4,
 ) -> list[str]:
+    resolved = resolve_checkpoint_stream(db, project, stream_id, include_inactive=True)
     rows = db.execute(
         """
         SELECT * FROM events
-        WHERE project_root = ? AND category = 'investigation'
+        WHERE project_root = ? AND stream_id = ? AND category = 'investigation'
+          AND (quarantine_reason IS NULL OR quarantine_reason = '')
         ORDER BY id DESC
         LIMIT 24
         """,
-        (str(project.root),),
+        (str(project.root), resolved),
     ).fetchall()
     if len(rows) < threshold:
         return []
@@ -1534,15 +2391,22 @@ def investigation_loop_warnings(
     return []
 
 
-def tool_output_blindness_warnings(db: sqlite3.Connection, project: Project) -> list[str]:
+def tool_output_blindness_warnings(
+    db: sqlite3.Connection,
+    project: Project,
+    *,
+    stream_id: str | None = None,
+) -> list[str]:
+    resolved = resolve_checkpoint_stream(db, project, stream_id, include_inactive=True)
     rows = db.execute(
         """
         SELECT * FROM events
-        WHERE project_root = ?
+        WHERE project_root = ? AND stream_id = ?
+          AND (quarantine_reason IS NULL OR quarantine_reason = '')
         ORDER BY id DESC
         LIMIT 6
         """,
-        (str(project.root),),
+        (str(project.root), resolved),
     ).fetchall()
     if len(rows) < 2:
         return []
@@ -1615,9 +2479,10 @@ def trim_packet_text(value: Any, limit: int) -> str:
     text = re.sub(r"\s+", " ", escape_packet_text(value)).strip()
     if len(text) <= limit:
         return text
-    if limit <= 14:
+    marker = " ..."
+    if limit <= len(marker) + 4:
         return text[:limit]
-    return text[: limit - 14].rstrip() + " ...[cut]"
+    return text[: limit - len(marker)].rstrip() + marker
 
 
 def first_packet_line(text: str | None, *, fallback: str, limit: int) -> str:
@@ -1681,7 +2546,10 @@ def priority_resume_packet(
     warnings: list[str],
     reason: str,
     max_chars: int,
+    stream: StreamScope | None = None,
+    compact_epoch: int = 0,
 ) -> str:
+    stream = stream or coerce_stream(DEFAULT_STREAM_ID)
     objective = (
         f"status: {trim_packet_text(checkpoint['status'], 16)}; objective: {trim_packet_text(checkpoint['objective'], 72)}"
         if checkpoint
@@ -1697,6 +2565,8 @@ def priority_resume_packet(
     avoid = strongest_do_not_repeat_line(checkpoint, warnings, limit=84)
     lines = [
         f'<compaction-sentinel version="{VERSION}" schema="packet-v2" reason="{trim_packet_text(reason, 32)}">',
+        f"<stream>id: {trim_packet_text(stream.id, 48)}; label: {trim_packet_text(stream.label or 'none', 64)}</stream>",
+        f"<compact_epoch>{compact_epoch}</compact_epoch>",
         f"<active_objective>{objective}</active_objective>",
     ]
     if not checkpoint and last_checkpoint:
@@ -1713,7 +2583,7 @@ def priority_resume_packet(
             f"<blockers>- {blocker}</blockers>",
             f"<evidence>- {evidence}</evidence>",
             f"<do_not_repeat>- {avoid}</do_not_repeat>",
-            "<resume_contract>Continue live objective; do not restart; verify latest output before completion.</resume_contract>",
+            "<resume_contract>Use only this stream as active work; peer workstreams are awareness only; verify latest output before completion.</resume_contract>",
             "</compaction-sentinel>",
         ]
     )
@@ -1728,6 +2598,7 @@ def priority_resume_packet(
         )
         lines = [
             f'<compaction-sentinel version="{VERSION}" schema="packet-v2" reason="{trim_packet_text(reason, 20)}">',
+            f"<stream>id: {trim_packet_text(stream.id, 36)}</stream>",
             f"<active_objective>{objective}</active_objective>",
         ]
         if not checkpoint and last_checkpoint:
@@ -1744,14 +2615,27 @@ def priority_resume_packet(
                 f"<blockers>- {strongest_blocker_line(checkpoint, limit=limit)}</blockers>",
                 f"<evidence>- {strongest_evidence_line(checkpoint, limit=limit)}</evidence>",
                 f"<do_not_repeat>- {strongest_do_not_repeat_line(checkpoint, warnings, limit=limit)}</do_not_repeat>",
-                "<resume_contract>Continue live work; do not restart; verify before completion.</resume_contract>",
+                "<resume_contract>Use only this stream as active work; peers are awareness only.</resume_contract>",
                 "</compaction-sentinel>",
             ]
         )
         packet = "\n".join(lines)
         if len(packet) <= max_chars:
             return packet
-    return compact_lines(lines, max_chars=max_chars)
+    minimal_lines = [
+        f'<compaction-sentinel version="{VERSION}" schema="packet-v2" reason="{trim_packet_text(reason, 20)}">',
+        f"<active_objective>{trim_packet_text(objective, 52)}</active_objective>",
+        f"<next_action>{trim_packet_text(next_action, 44)}</next_action>",
+        f"<blockers>- {strongest_blocker_line(checkpoint, limit=36)}</blockers>",
+        f"<evidence>- {strongest_evidence_line(checkpoint, limit=36)}</evidence>",
+        f"<do_not_repeat>- {strongest_do_not_repeat_line(checkpoint, warnings, limit=40)}</do_not_repeat>",
+        "<resume_contract>Continue this stream; peers awareness only.</resume_contract>",
+        "</compaction-sentinel>",
+    ]
+    packet = "\n".join(minimal_lines)
+    if len(packet) <= max_chars:
+        return packet
+    return compact_lines(minimal_lines, max_chars=max_chars)
 
 
 def build_resume_packet(
@@ -1761,13 +2645,24 @@ def build_resume_packet(
     reason: str = "resume",
     max_chars: int = DEFAULT_MAX_PACKET_CHARS,
     loop_threshold: int = DEFAULT_LOOP_THRESHOLD,
+    stream: StreamScope | None = None,
+    stream_id: str | None = None,
+    stream_label: str = "",
 ) -> str:
-    checkpoint = active_checkpoint(db, project)
-    latest = latest_checkpoint(db, project)
+    stream = stream or coerce_stream(
+        resolve_checkpoint_stream(db, project, stream_id) if stream_id is None else stream_id,
+        stream_label,
+    )
+    checkpoint = active_checkpoint(db, project, stream_id=stream.id)
+    latest = latest_checkpoint(db, project, stream_id=stream.id)
     last_checkpoint = latest if not checkpoint and not is_active_checkpoint_row(latest) else None
-    events = recent_events(db, project)
-    notes = recent_notes(db, project)
-    warnings = loop_warnings(db, project, threshold=loop_threshold)
+    events = recent_events(db, project, stream_id=stream.id)
+    notes = recent_notes(db, project, stream_id=stream.id)
+    warnings = loop_warnings(db, project, stream_id=stream.id, threshold=loop_threshold)
+    peers = active_peer_checkpoints(db, project, stream.id)
+    peer_conflicts = peer_conflict_warnings(db, project, stream.id, checkpoint=checkpoint)
+    compact_epoch = current_compaction_epoch(db, project, stream.id)
+    quarantined = quarantine_count(db, project, stream_id=stream.id)
     generated_at = utc_now().replace("+00:00", "Z")
 
     lines: list[str] = [
@@ -1784,6 +2679,13 @@ def build_resume_packet(
         f"root: {escape_packet_text(project.root)}",
         f"host: {escape_packet_text(platform.system() + ' ' + platform.release())}",
         "</project>",
+        "",
+        "<stream>",
+        f"id: {escape_packet_text(stream.id)}",
+        f"label: {escape_packet_text(stream.label or 'none')}",
+        f"compact_epoch: {compact_epoch}",
+        f"quarantined_rows: {quarantined}",
+        "</stream>",
     ]
 
     if checkpoint:
@@ -1889,6 +2791,31 @@ def build_resume_packet(
         lines.append("- Before repeating, inspect the concrete artifact/log/result and choose one new hypothesis.")
         lines.append("</do_not_repeat>")
 
+    if peer_conflicts:
+        lines.append("")
+        lines.append("<peer_conflicts awareness=\"only\">")
+        for warning in peer_conflicts:
+            lines.append(f"- {escape_packet_text(warning)}")
+        lines.append("- Do not replace this stream's next action with a peer stream's next action.")
+        lines.append("</peer_conflicts>")
+
+    if peers:
+        lines.append("")
+        lines.append("<peer_workstreams awareness=\"only\">")
+        for peer in peers[:6]:
+            summary = stream_summary(peer)
+            lines.append(
+                "- "
+                f"stream={escape_packet_text(summary['stream_id'])}; "
+                f"label={escape_packet_text(summary['stream_label'] or 'none')}; "
+                f"status={escape_packet_text(summary['status'])}; "
+                f"updated_at={escape_packet_text(summary['updated_at'])}; "
+                f"objective={escape_packet_text(trim_packet_text(summary['objective'], 220))}; "
+                f"files={escape_packet_text(summary['files_touched'] or 'none recorded')}"
+            )
+        lines.append("- Peer workstreams are awareness only and never the current next action.")
+        lines.append("</peer_workstreams>")
+
     if notes:
         lines.append("")
         lines.append("<continuity_notes>")
@@ -1913,6 +2840,7 @@ def build_resume_packet(
             "",
             "<resume_contract>",
             "- Continue the live objective from this packet; do not restart from only the last user message.",
+            "- Use only this stream as active work. Peer workstreams are awareness only.",
             "- Treat checkpoints, notes, current files, and verified command output as authority over stale summaries.",
             "- Preserve user acceptance criteria in natural language.",
             "- If a warning appears, inspect the latest concrete evidence and change hypothesis before repeating.",
@@ -1928,6 +2856,8 @@ def build_resume_packet(
             warnings=warnings,
             reason=reason,
             max_chars=max_chars,
+            stream=stream,
+            compact_epoch=compact_epoch,
         )
     return compact_lines(lines, max_chars=max_chars)
 
@@ -1975,24 +2905,29 @@ def turn_state_id(payload: dict[str, Any]) -> str:
     return hash_text(f"{session_id}:{turn_id}")[:24]
 
 
-def stop_continue_turn_key(project: Project, payload: dict[str, Any]) -> str:
-    return f"{project_state_prefix(project)}stop_continue:turn:{turn_state_id(payload)}"
+def stop_continue_turn_key(project: Project, payload: dict[str, Any], stream_id: str) -> str:
+    return f"{stream_state_prefix(project, stream_id)}stop_continue:turn:{turn_state_id(payload)}"
 
 
-def stop_continue_checkpoint_key(project: Project, payload: dict[str, Any], checkpoint: sqlite3.Row) -> str:
-    return f"{project_state_prefix(project)}stop_continue:checkpoint:{turn_state_id(payload)}:{checkpoint['id']}"
+def stop_continue_checkpoint_key(
+    project: Project,
+    payload: dict[str, Any],
+    checkpoint: sqlite3.Row,
+    stream_id: str,
+) -> str:
+    return f"{stream_state_prefix(project, stream_id)}stop_continue:checkpoint:{turn_state_id(payload)}:{checkpoint['id']}"
 
 
-def stop_continue_last_signature_key(project: Project) -> str:
-    return f"{project_state_prefix(project)}stop_continue:last_signature"
+def stop_continue_last_signature_key(project: Project, stream_id: str) -> str:
+    return f"{stream_state_prefix(project, stream_id)}stop_continue:last_signature"
 
 
-def stop_continue_next_action_key(project: Project, checkpoint: sqlite3.Row) -> str:
-    return f"{project_state_prefix(project)}stop_continue:next_action:{hash_text(str(checkpoint['next_action'] or ''))[:16]}"
+def stop_continue_next_action_key(project: Project, checkpoint: sqlite3.Row, stream_id: str) -> str:
+    return f"{stream_state_prefix(project, stream_id)}stop_continue:next_action:{hash_text(str(checkpoint['next_action'] or ''))[:16]}"
 
 
-def stop_continue_cooldown_key(project: Project) -> str:
-    return f"{project_state_prefix(project)}stop_continue:last_at"
+def stop_continue_cooldown_key(project: Project, stream_id: str) -> str:
+    return f"{stream_state_prefix(project, stream_id)}stop_continue:last_at"
 
 
 def stop_signature(checkpoint: sqlite3.Row) -> str:
@@ -2030,53 +2965,62 @@ def maybe_stop_continue(
     project: Project,
     payload: dict[str, Any],
     config: dict[str, Any],
+    *,
+    stream: StreamScope | None = None,
 ) -> dict[str, Any] | None:
+    stream = stream or stream_from_payload(payload, project, config, db)
     policy = str(config.get("auto_continue") or "off").lower()
     if policy not in {"gentle", "strict"}:
         return None
     if payload.get("stop_hook_active"):
         return None
-    checkpoint = active_checkpoint(db, project)
+    checkpoint = active_checkpoint(db, project, stream_id=stream.id)
     if not checkpoint or checkpoint["status"] == "complete":
         return None
     max_per_turn = config_int(config, "stop_continue_max_per_turn", 1, minimum=0)
     max_per_checkpoint = config_int(config, "stop_continue_max_per_checkpoint_per_turn", 1, minimum=0)
     if max_per_turn <= 0:
         return None
-    turn_key = stop_continue_turn_key(project, payload)
-    checkpoint_key = stop_continue_checkpoint_key(project, payload, checkpoint)
+    turn_key = stop_continue_turn_key(project, payload, stream.id)
+    checkpoint_key = stop_continue_checkpoint_key(project, payload, checkpoint, stream.id)
     if state_count(db, turn_key) >= max_per_turn:
         return None
     if max_per_checkpoint > 0 and state_count(db, checkpoint_key) >= max_per_checkpoint:
         return None
     cooldown_seconds = config_int(config, "stop_continue_cooldown_seconds", 0, minimum=0)
-    if within_cooldown(get_state(db, stop_continue_cooldown_key(project)), cooldown_seconds):
+    if within_cooldown(get_state(db, stop_continue_cooldown_key(project, stream.id)), cooldown_seconds):
         return None
     last = extract_last_assistant(payload)
     if looks_complete(last):
         return None
     signature = stop_signature(checkpoint)
-    last_signature_key = stop_continue_last_signature_key(project)
+    last_signature_key = stop_continue_last_signature_key(project, stream.id)
     if get_state(db, last_signature_key) == signature:
         return None
     if checkpoint["next_action"]:
-        next_action_key = stop_continue_next_action_key(project, checkpoint)
+        next_action_key = stop_continue_next_action_key(project, checkpoint, stream.id)
         if get_state(db, next_action_key) == "used":
             return None
-    if loop_warnings(db, project, threshold=config_int(config, "loop_threshold", DEFAULT_LOOP_THRESHOLD, minimum=1)):
+    if loop_warnings(
+        db,
+        project,
+        stream_id=stream.id,
+        threshold=config_int(config, "loop_threshold", DEFAULT_LOOP_THRESHOLD, minimum=1),
+    ):
         return None
     set_state(db, turn_key, str(state_count(db, turn_key) + 1))
     set_state(db, checkpoint_key, str(state_count(db, checkpoint_key) + 1))
     set_state(db, last_signature_key, signature)
-    set_state(db, stop_continue_cooldown_key(project), utc_now())
+    set_state(db, stop_continue_cooldown_key(project, stream.id), utc_now())
     if checkpoint["next_action"]:
-        set_state(db, stop_continue_next_action_key(project, checkpoint), "used")
+        set_state(db, stop_continue_next_action_key(project, checkpoint, stream.id), "used")
     reason = build_resume_packet(
         db,
         project,
         reason="stop-continuation",
         max_chars=min(config_int(config, "max_packet_chars", DEFAULT_MAX_PACKET_CHARS, minimum=500), 6500),
         loop_threshold=config_int(config, "loop_threshold", DEFAULT_LOOP_THRESHOLD, minimum=1),
+        stream=stream,
     )
     reason += "\n\nContinue this active objective. First state the next concrete action, then perform it."
     if policy == "strict":
@@ -2109,12 +3053,13 @@ def pre_tool_warnings(
     project: Project,
     row: sqlite3.Row,
     *,
+    stream_id: str,
     threshold: int,
     mode: str,
 ) -> list[str]:
     if mode == "light":
         return []
-    return repeat_warnings(db, project, fingerprint_value=row["fingerprint"], threshold=threshold)
+    return repeat_warnings(db, project, stream_id=stream_id, fingerprint_value=row["fingerprint"], threshold=threshold)
 
 
 def post_tool_warnings(
@@ -2122,16 +3067,17 @@ def post_tool_warnings(
     project: Project,
     row: sqlite3.Row,
     *,
+    stream_id: str,
     command: str,
     threshold: int,
     mode: str,
 ) -> list[str]:
     if mode == "light":
         return []
-    warnings = repeat_warnings(db, project, fingerprint_value=row["fingerprint"], threshold=threshold)
+    warnings = repeat_warnings(db, project, stream_id=stream_id, fingerprint_value=row["fingerprint"], threshold=threshold)
     category = str(row["category"] or "")
     if category == "tool_failure" or is_test_or_build_command(command):
-        warnings.extend(failure_loop_warnings(db, project, threshold=threshold))
+        warnings.extend(failure_loop_warnings(db, project, stream_id=stream_id, threshold=threshold))
     return dedupe_keep_order(warnings)[:8]
 
 
@@ -2152,6 +3098,7 @@ def _handle_hook(
     config = load_runtime_config(codex_home)
     redact = bool(config.get("redact", True))
     project = project_from_payload(payload)
+    stream = stream_from_payload(payload, project, config, db)
     event_name = event_name or str(payload.get("hook_event_name") or "")
     loop_threshold = config_int(config, "loop_threshold", DEFAULT_LOOP_THRESHOLD, minimum=1)
     max_chars = config_int(config, "max_packet_chars", DEFAULT_MAX_PACKET_CHARS, minimum=500)
@@ -2172,6 +3119,47 @@ def _handle_hook(
     input_limit = config_int(config, "max_tool_input_chars", DEFAULT_MAX_TOOL_INPUT_CHARS, minimum=120)
     mode = performance_mode(config)
 
+    if event_name in {"PreCompact", "PostCompact"}:
+        if event_name == "PreCompact":
+            epoch = advance_compaction_epoch(db, project, stream.id)
+        else:
+            epoch = current_compaction_epoch(db, project, stream.id)
+            if epoch <= 0:
+                epoch = advance_compaction_epoch(db, project, stream.id)
+        checkpoint = active_checkpoint(db, project, stream_id=stream.id)
+        trigger = payload.get("trigger") or payload.get("source") or payload.get("reason") or "unknown"
+        record_event(
+            db,
+            project,
+            payload,
+            event_name=event_name,
+            kind="compact",
+            summary=f"{event_name}: {trigger}",
+            details={
+                "trigger": trigger,
+                "capture_only": not compact_context_enabled(config),
+                "active_checkpoint": checkpoint_to_dict(checkpoint),
+            },
+            redact=redact,
+            max_events=max_events,
+            retention_days=retention_days,
+            retention_check_interval_seconds=retention_interval,
+            prune_check_interval_events=prune_interval,
+            stream=stream,
+            compaction_epoch=epoch,
+        )
+        if compact_context_enabled(config):
+            packet = build_resume_packet(
+                db,
+                project,
+                reason=event_name.lower(),
+                max_chars=max_chars,
+                loop_threshold=loop_threshold,
+                stream=stream,
+            )
+            return hook_output(event_name, packet)
+        return {}
+
     if event_name == "UserPromptSubmit":
         prompt = extract_prompt(payload, redact=redact)
         row = record_event(
@@ -2187,16 +3175,24 @@ def _handle_hook(
             retention_days=retention_days,
             retention_check_interval_seconds=retention_interval,
             prune_check_interval_events=prune_interval,
+            stream=stream,
         )
-        update_checkpoint_from_prompt(db, project, payload, prompt, redact=redact)
+        update_checkpoint_from_prompt(db, project, payload, prompt, redact=redact, stream=stream)
         packet = build_resume_packet(
             db,
             project,
             reason="user-prompt",
             max_chars=max_chars,
             loop_threshold=loop_threshold,
+            stream=stream,
         )
-        warnings = loop_warnings(db, project, fingerprint_value=row["fingerprint"], threshold=loop_threshold)
+        warnings = loop_warnings(
+            db,
+            project,
+            stream_id=stream.id,
+            fingerprint_value=row["fingerprint"],
+            threshold=loop_threshold,
+        )
         message = (
             "Compaction Sentinel detected repeated context; inspect the latest artifact before repeating."
             if warnings
@@ -2205,26 +3201,32 @@ def _handle_hook(
         return hook_output(event_name, packet, message)
 
     if event_name == "SessionStart":
+        source = str(payload.get("source") or "unknown")
         record_event(
             db,
             project,
             payload,
             event_name=event_name,
             kind="session",
-            summary=f"Session start: {payload.get('source') or 'unknown'}",
-            details={"source": payload.get("source")},
+            summary=f"Session start: {source}",
+            details={"source": source},
             redact=redact,
             max_events=max_events,
             retention_days=retention_days,
             retention_check_interval_seconds=retention_interval,
             prune_check_interval_events=prune_interval,
+            stream=stream,
         )
+        is_compact_start = source.strip().lower() == "compact"
+        if is_compact_start and not compact_context_enabled(config):
+            return {}
         packet = build_resume_packet(
             db,
             project,
-            reason="session-start",
+            reason="compact-session-start" if is_compact_start else "session-start",
             max_chars=max_chars,
             loop_threshold=loop_threshold,
+            stream=stream,
         )
         return hook_output(event_name, packet)
 
@@ -2246,8 +3248,9 @@ def _handle_hook(
             retention_days=retention_days,
             retention_check_interval_seconds=retention_interval,
             prune_check_interval_events=prune_interval,
+            stream=stream,
         )
-        warnings = pre_tool_warnings(db, project, row, threshold=loop_threshold, mode=mode)
+        warnings = pre_tool_warnings(db, project, row, stream_id=stream.id, threshold=loop_threshold, mode=mode)
         if warnings:
             return hook_output(
                 event_name,
@@ -2262,7 +3265,7 @@ def _handle_hook(
         tool_name = extract_tool_name(payload)
         tool_input = extract_tool_input(payload, redact=redact, limit=input_limit)
         reason = extract_permission_reason(payload, redact=redact)
-        checkpoint = active_checkpoint(db, project)
+        checkpoint = active_checkpoint(db, project, stream_id=stream.id)
         summary = tool_input or f"{tool_name} permission requested"
         if reason:
             summary += f" | reason: {reason}"
@@ -2284,8 +3287,15 @@ def _handle_hook(
             retention_days=retention_days,
             retention_check_interval_seconds=retention_interval,
             prune_check_interval_events=prune_interval,
+            stream=stream,
         )
-        warnings = repeat_warnings(db, project, fingerprint_value=row["fingerprint"], threshold=loop_threshold)
+        warnings = repeat_warnings(
+            db,
+            project,
+            stream_id=stream.id,
+            fingerprint_value=row["fingerprint"],
+            threshold=loop_threshold,
+        )
         if warnings:
             return {
                 "systemMessage": "Repeated permission request detected. Compaction Sentinel recorded it but will not approve or deny it automatically."
@@ -2315,11 +3325,13 @@ def _handle_hook(
             retention_days=retention_days,
             retention_check_interval_seconds=retention_interval,
             prune_check_interval_events=prune_interval,
+            stream=stream,
         )
         warnings = post_tool_warnings(
             db,
             project,
             row,
+            stream_id=stream.id,
             command=tool_input,
             threshold=loop_threshold,
             mode=mode,
@@ -2349,9 +3361,10 @@ def _handle_hook(
             retention_days=retention_days,
             retention_check_interval_seconds=retention_interval,
             prune_check_interval_events=prune_interval,
+            stream=stream,
         )
-        warnings = loop_warnings(db, project, threshold=loop_threshold)
-        continuation = maybe_stop_continue(db, project, payload, config)
+        warnings = loop_warnings(db, project, stream_id=stream.id, threshold=loop_threshold)
+        continuation = maybe_stop_continue(db, project, payload, config, stream=stream)
         if continuation:
             return continuation
         if warnings:
@@ -2377,22 +3390,30 @@ def _handle_hook(
         retention_days=retention_days,
         retention_check_interval_seconds=retention_interval,
         prune_check_interval_events=prune_interval,
+        stream=stream,
     )
     return {}
 
 
 def search_events(
-    db: sqlite3.Connection, project: Project, query: str, *, limit: int = 8
+    db: sqlite3.Connection,
+    project: Project,
+    query: str,
+    *,
+    limit: int = 8,
+    stream_id: str | None = None,
 ) -> list[sqlite3.Row]:
     terms = [term.lower() for term in re.findall(r"[A-Za-z0-9_./:-]{2,}", query)]
+    resolved = resolve_checkpoint_stream(db, project, stream_id, include_inactive=True)
     rows = db.execute(
         """
         SELECT * FROM events
-        WHERE project_root = ?
+        WHERE project_root = ? AND stream_id = ?
+          AND (quarantine_reason IS NULL OR quarantine_reason = '')
         ORDER BY id DESC
         LIMIT 200
         """,
-        (str(project.root),),
+        (str(project.root), resolved),
     ).fetchall()
     if not terms:
         return rows[:limit]
@@ -2411,29 +3432,40 @@ def project_from_cli(cwd: str | None = None) -> Project:
     return Project(root=root, name=root.name or "workspace")
 
 
-def scrub_project(db: sqlite3.Connection, project: Project) -> dict[str, int]:
+def scrub_project(
+    db: sqlite3.Connection,
+    project: Project,
+    *,
+    stream_id: str | None = None,
+) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for table in ("events", "notes", "checkpoints"):
-        row = db.execute(
-            f"SELECT COUNT(*) AS count FROM {table} WHERE project_root = ?",
-            (str(project.root),),
-        ).fetchone()
+    resolved = normalize_stream_id(stream_id) if stream_id is not None else None
+    for table in ("events", "notes", "checkpoints", "memory_candidates"):
+        if resolved is None:
+            where = "project_root = ?"
+            params: tuple[Any, ...] = (str(project.root),)
+        else:
+            where = "project_root = ? AND stream_id = ?"
+            params = (str(project.root), resolved)
+        row = db.execute(f"SELECT COUNT(*) AS count FROM {table} WHERE {where}", params).fetchone()
         counts[table] = int(row["count"] if row else 0)
-        db.execute(f"DELETE FROM {table} WHERE project_root = ?", (str(project.root),))
-    state_keys = {
-        str(row["key"])
-        for row in db.execute(
-            "SELECT key FROM state WHERE key LIKE ?",
-            (project_state_prefix(project) + "%",),
-        ).fetchall()
-    }
-    # Remove legacy v0.3 keys that stored the raw project path.
-    raw_root = str(project.root)
-    state_keys.update(
-        str(row["key"])
-        for row in db.execute("SELECT key FROM state").fetchall()
-        if raw_root in str(row["key"])
-    )
+        db.execute(f"DELETE FROM {table} WHERE {where}", params)
+    prefix = stream_state_prefix(project, resolved) if resolved is not None else project_state_prefix(project)
+    state_keys = {str(row["key"]) for row in db.execute("SELECT key FROM state WHERE key LIKE ?", (prefix + "%",)).fetchall()}
+    if resolved is None:
+        # Remove legacy v0.3 keys that stored the raw project path.
+        raw_root = str(project.root)
+        state_keys.update(
+            str(row["key"])
+            for row in db.execute("SELECT key FROM state").fetchall()
+            if raw_root in str(row["key"])
+        )
+    else:
+        state_keys.update(
+            str(row["key"])
+            for row in db.execute("SELECT key FROM state WHERE key LIKE ?", (project_state_prefix(project) + "session_stream:%",)).fetchall()
+            if get_state(db, str(row["key"])) == resolved
+        )
     counts["state"] = len(state_keys)
     for key in state_keys:
         db.execute("DELETE FROM state WHERE key = ?", (key,))
@@ -2443,7 +3475,7 @@ def scrub_project(db: sqlite3.Connection, project: Project) -> dict[str, int]:
 
 def scrub_all(db: sqlite3.Connection) -> dict[str, int]:
     counts: dict[str, int] = {}
-    for table in ("events", "notes", "checkpoints", "state"):
+    for table in ("events", "notes", "checkpoints", "memory_candidates", "state"):
         row = db.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
         counts[table] = int(row["count"] if row else 0)
         db.execute(f"DELETE FROM {table}")
@@ -2451,25 +3483,132 @@ def scrub_all(db: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 
-def export_project(db: sqlite3.Connection, project: Project) -> dict[str, Any]:
+def save_memory_candidate(
+    db: sqlite3.Connection,
+    project: Project,
+    *,
+    content: str,
+    title: str = "",
+    tags: str = "",
+    importance: str = "",
+    stream: StreamScope | None = None,
+    stream_id: str | None = None,
+    stream_label: str = "",
+    source_system: str = DEFAULT_SOURCE_SYSTEM,
+    source_ref: str = "",
+    foreign_project_hint: str = "",
+    quarantine_reason: str = "",
+    thread_id: str = "",
+    imported: bool = False,
+    ownership_proven: bool = False,
+    redact: bool = True,
+) -> int:
+    stream = stream or coerce_stream(stream_id, stream_label, redact=redact)
+    clean_content = normalize_text(content, 6000, redact=redact)
+    if not clean_content:
+        raise ValueError("memory candidate content is required")
+    if not quarantine_reason:
+        detected_hint, detected_reason = quarantine_reason_for_payload(
+            project,
+            {"thread_id": thread_id},
+            summary=clean_content + " " + title + " " + tags,
+            imported=imported,
+            ownership_proven=ownership_proven,
+        )
+        foreign_project_hint = foreign_project_hint or detected_hint
+        quarantine_reason = detected_reason
+    now = utc_now()
+    db.execute(
+        """
+        INSERT OR IGNORE INTO memory_candidates
+          (project_root, project_name, stream_id, stream_label, content, title, tags, importance,
+           source_system, source_ref, foreign_project_hint, quarantine_reason, thread_id, created_at, updated_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            str(project.root),
+            project.name,
+            stream.id,
+            stream.label or None,
+            clean_content,
+            normalize_text(title, 400, redact=redact),
+            normalize_text(tags, 400, redact=redact),
+            normalize_text(importance, 80, redact=redact),
+            normalize_text(source_system, 120, redact=False) or None,
+            normalize_text(source_ref, 300, redact=False) or None,
+            normalize_text(foreign_project_hint, 500, redact=False) or None,
+            normalize_text(quarantine_reason, 300, redact=False) or None,
+            normalize_text(thread_id, 300, redact=False) or None,
+            now,
+            now,
+        ),
+    )
+    db.commit()
+    if source_system and source_ref:
+        row = db.execute(
+            "SELECT id FROM memory_candidates WHERE source_system = ? AND source_ref = ? ORDER BY id DESC LIMIT 1",
+            (normalize_text(source_system, 120, redact=False), normalize_text(source_ref, 300, redact=False)),
+        ).fetchone()
+    else:
+        row = db.execute("SELECT last_insert_rowid() AS id").fetchone()
+    return int(row["id"])
+
+
+def list_memory_candidates(
+    db: sqlite3.Connection,
+    project: Project | None = None,
+    *,
+    include_quarantined: bool = False,
+    limit: int = 50,
+) -> list[dict[str, Any]]:
+    clauses: list[str] = []
+    params: list[Any] = []
+    if project is not None:
+        clauses.append("project_root = ?")
+        params.append(str(project.root))
+    if not include_quarantined:
+        clauses.append("(quarantine_reason IS NULL OR quarantine_reason = '')")
+    where = "WHERE " + " AND ".join(clauses) if clauses else ""
+    return [
+        dict(row)
+        for row in db.execute(
+            f"SELECT * FROM memory_candidates {where} ORDER BY id DESC LIMIT ?",
+            (*params, int(limit)),
+        ).fetchall()
+    ]
+
+
+def export_project(
+    db: sqlite3.Connection,
+    project: Project,
+    *,
+    stream_id: str | None = None,
+) -> dict[str, Any]:
+    resolved = normalize_stream_id(stream_id) if stream_id is not None else None
+    if resolved is None:
+        where = "project_root = ?"
+        params: tuple[Any, ...] = (str(project.root),)
+    else:
+        where = "project_root = ? AND stream_id = ?"
+        params = (str(project.root), resolved)
     checkpoints = [
         dict(row)
         for row in db.execute(
-            "SELECT * FROM checkpoints WHERE project_root = ? ORDER BY id DESC",
-            (str(project.root),),
+            f"SELECT * FROM checkpoints WHERE {where} ORDER BY id DESC",
+            params,
         ).fetchall()
     ]
     notes = [
         dict(row)
         for row in db.execute(
-            "SELECT * FROM notes WHERE project_root = ? ORDER BY id DESC",
-            (str(project.root),),
+            f"SELECT * FROM notes WHERE {where} ORDER BY id DESC",
+            params,
         ).fetchall()
     ]
     events = []
     for row in db.execute(
-        "SELECT * FROM events WHERE project_root = ? ORDER BY id DESC",
-        (str(project.root),),
+        f"SELECT * FROM events WHERE {where} ORDER BY id DESC",
+        params,
     ).fetchall():
         item = dict(row)
         try:
@@ -2477,12 +3616,289 @@ def export_project(db: sqlite3.Connection, project: Project) -> dict[str, Any]:
         except Exception:
             item["details"] = {}
         events.append(item)
+    memory_candidates = [
+        dict(row)
+        for row in db.execute(
+            f"SELECT * FROM memory_candidates WHERE {where} ORDER BY id DESC",
+            params,
+        ).fetchall()
+    ]
     return {
         "version": VERSION,
         "exported_at": utc_now(),
         "project": project.name,
         "project_root": str(project.root),
+        "stream_id": resolved,
         "checkpoints": checkpoints,
         "notes": notes,
         "events": events,
+        "memory_candidates": memory_candidates,
     }
+
+
+def compact_status(db: sqlite3.Connection, project: Project, stream: StreamScope) -> dict[str, Any]:
+    return {
+        "project": project.name,
+        "project_root": str(project.root),
+        "current_stream": {"stream_id": stream.id, "stream_label": stream.label},
+        "compaction_epoch": current_compaction_epoch(db, project, stream.id),
+        "compact_context_smoke_passed": False,
+        "quarantine_count": quarantine_count(db, project, stream_id=stream.id),
+    }
+
+
+def compact_audit(
+    db: sqlite3.Connection,
+    project: Project,
+    stream: StreamScope,
+    *,
+    limit: int = 20,
+) -> dict[str, Any]:
+    rows = db.execute(
+        """
+        SELECT * FROM events
+        WHERE project_root = ?
+          AND stream_id = ?
+          AND event_name IN ('PreCompact', 'PostCompact')
+        ORDER BY id DESC
+        LIMIT ?
+        """,
+        (str(project.root), stream.id, int(limit)),
+    ).fetchall()
+    return {
+        **compact_status(db, project, stream),
+        "events": [dict(row) for row in rows],
+    }
+
+
+def codex_context_db_path(codex_home: Path) -> Path:
+    return codex_home / "codex-context" / "context.db"
+
+
+def sqlite_table_exists(db: sqlite3.Connection, table: str) -> bool:
+    row = db.execute("SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?", (table,)).fetchone()
+    return row is not None
+
+
+def row_value(row: sqlite3.Row, key: str, default: Any = "") -> Any:
+    return row[key] if key in row.keys() else default
+
+
+def source_ref_for_row(table: str, row: sqlite3.Row) -> str:
+    stable = row_value(row, "content_hash") or hash_text(
+        json.dumps({key: row[key] for key in row.keys()}, ensure_ascii=False, sort_keys=True, default=str)
+    )[:24]
+    return f"{table}:{row_value(row, 'id')}:{stable}"
+
+
+def project_from_codex_context_path(value: Any) -> Project:
+    raw = str(value or "").strip()
+    root = find_project_root(Path(raw).expanduser()) if raw else Path.cwd()
+    return Project(root=root, name=root.name or "workspace")
+
+
+def project_ownership_proven(project: Project, source_project_path: Any, content: str = "") -> bool:
+    if not source_project_path:
+        return False
+    try:
+        source_root = find_project_root(Path(str(source_project_path)).expanduser())
+        same_root = source_root.resolve(strict=False) == project.root.resolve(strict=False)
+    except Exception:
+        same_root = False
+    if not same_root:
+        return False
+    hint, reason = quarantine_reason_for_payload(
+        project,
+        {"project_path": str(source_project_path)},
+        summary=content,
+        imported=True,
+        ownership_proven=True,
+    )
+    return not reason and not hint
+
+
+def inspect_codex_context(codex_home: Path) -> dict[str, Any]:
+    path = codex_context_db_path(codex_home)
+    result: dict[str, Any] = {
+        "codex_context_db": str(path),
+        "exists": path.exists(),
+        "readable": False,
+        "counts": {"records": 0, "notes": 0, "checkpoints": 0},
+        "planned_actions": [],
+    }
+    if not path.exists():
+        result["planned_actions"].append("no codex-context database found")
+        return result
+    try:
+        source = sqlite3.connect(f"file:{path}?mode=ro", uri=True)
+        source.row_factory = sqlite3.Row
+        result["readable"] = True
+        for table in ("records", "notes", "checkpoints"):
+            if sqlite_table_exists(source, table):
+                row = source.execute(f"SELECT COUNT(*) AS count FROM {table}").fetchone()
+                result["counts"][table] = int(row["count"] if row else 0)
+        result["planned_actions"].extend(
+            [
+                "import records as memory candidates",
+                "import notes as Sentinel notes",
+                "import checkpoints as checkpoints only when objective ownership is proven; otherwise notes",
+                "quarantine imported rows unless project ownership is proven",
+            ]
+        )
+        source.close()
+    except Exception as exc:
+        result["error"] = str(exc)
+    return result
+
+
+def backup_codex_context_state(codex_home: Path) -> dict[str, Any]:
+    stamp = time.strftime("%Y%m%d-%H%M%S")
+    backup_dir = codex_home / "backups" / "compaction-sentinel" / f"codex-context-migration-{stamp}"
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    copied: dict[str, str] = {}
+    for label, path in {
+        "codex_context_db": codex_context_db_path(codex_home),
+        "hooks_json": codex_home / "hooks.json",
+        "config_toml": codex_home / "config.toml",
+    }.items():
+        if path.exists():
+            target = backup_dir / path.name
+            shutil.copy2(path, target)
+            copied[label] = str(target)
+    return {"backup_dir": str(backup_dir), "files": copied}
+
+
+def write_migration_rollback(codex_home: Path, manifest: dict[str, Any]) -> Path:
+    backup_dir = Path(str(manifest.get("backup", {}).get("backup_dir") or codex_home / "backups" / "compaction-sentinel"))
+    backup_dir.mkdir(parents=True, exist_ok=True)
+    path = backup_dir / "rollback.json"
+    path.write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    return path
+
+
+def import_codex_context(
+    codex_home: Path,
+    *,
+    sentinel_db: sqlite3.Connection,
+    redact: bool = True,
+) -> dict[str, Any]:
+    source_path = codex_context_db_path(codex_home)
+    result: dict[str, Any] = {
+        "source": str(source_path),
+        "imported": {"records": 0, "notes": 0, "checkpoints": 0, "checkpoint_notes": 0},
+        "skipped": {"records": 0, "notes": 0, "checkpoints": 0},
+    }
+    if not source_path.exists():
+        result["error"] = "codex-context database not found"
+        return result
+    source = sqlite3.connect(f"file:{source_path}?mode=ro", uri=True)
+    source.row_factory = sqlite3.Row
+    try:
+        if sqlite_table_exists(source, "records"):
+            for row in source.execute("SELECT * FROM records ORDER BY id").fetchall():
+                project = project_from_codex_context_path(row_value(row, "project_path"))
+                content = "\n".join(
+                    part
+                    for part in (
+                        str(row_value(row, "title") or ""),
+                        str(row_value(row, "content") or ""),
+                        str(row_value(row, "source_path") or ""),
+                    )
+                    if part
+                )
+                ownership = project_ownership_proven(project, row_value(row, "project_path"), content)
+                save_memory_candidate(
+                    sentinel_db,
+                    project,
+                    title=str(row_value(row, "title") or ""),
+                    content=content,
+                    tags=str(row_value(row, "tags") or ""),
+                    importance=str(row_value(row, "importance") or ""),
+                    source_system="codex-context",
+                    source_ref=source_ref_for_row("records", row),
+                    imported=True,
+                    ownership_proven=ownership,
+                    redact=redact,
+                )
+                result["imported"]["records"] += 1
+        if sqlite_table_exists(source, "notes"):
+            for row in source.execute("SELECT * FROM notes ORDER BY id").fetchall():
+                project = project_from_codex_context_path(row_value(row, "project_path"))
+                content = str(row_value(row, "content") or "")
+                ownership = project_ownership_proven(project, row_value(row, "project_path"), content)
+                save_note(
+                    sentinel_db,
+                    project,
+                    content,
+                    surface_condition=str(row_value(row, "surface_condition") or ""),
+                    status=str(row_value(row, "status") or "open"),
+                    source_system="codex-context",
+                    source_ref=source_ref_for_row("notes", row),
+                    imported=True,
+                    ownership_proven=ownership,
+                    redact=redact,
+                )
+                result["imported"]["notes"] += 1
+        if sqlite_table_exists(source, "checkpoints"):
+            for row in source.execute("SELECT * FROM checkpoints ORDER BY id").fetchall():
+                project = project_from_codex_context_path(row_value(row, "project_path") or row_value(row, "cwd"))
+                summary = str(row_value(row, "summary") or "")
+                prompt = str(row_value(row, "prompt_excerpt") or "")
+                response = str(row_value(row, "response_excerpt") or "")
+                content = "\n".join(
+                    part
+                    for part in (
+                        summary,
+                        prompt,
+                        response,
+                        str(row_value(row, "cwd") or ""),
+                        str(row_value(row, "transcript_path") or ""),
+                    )
+                    if part
+                )
+                ownership = project_ownership_proven(
+                    project,
+                    row_value(row, "project_path") or row_value(row, "cwd"),
+                    content,
+                )
+                objective = infer_objective(prompt) or infer_objective(summary)
+                source_ref = source_ref_for_row("checkpoints", row)
+                if ownership and objective:
+                    save_checkpoint(
+                        sentinel_db,
+                        project,
+                        objective=objective,
+                        current_step=normalize_text(summary or response, 1400, redact=redact),
+                        next_action="Continue from the imported codex-context checkpoint after verifying current files.",
+                        evidence=normalize_text(response, 1800, redact=redact),
+                        source="codex-context",
+                        source_system="codex-context",
+                        source_ref=source_ref,
+                        session_id=str(row_value(row, "session_id") or ""),
+                        thread_id=str(row_value(row, "session_id") or ""),
+                        imported=True,
+                        ownership_proven=True,
+                        redact=redact,
+                    )
+                    result["imported"]["checkpoints"] += 1
+                else:
+                    save_note(
+                        sentinel_db,
+                        project,
+                        content or "Imported codex-context checkpoint with no portable summary.",
+                        surface_condition="imported codex-context checkpoint; not active objective",
+                        source_system="codex-context",
+                        source_ref=source_ref,
+                        imported=True,
+                        ownership_proven=ownership,
+                        redact=redact,
+                    )
+                    result["imported"]["checkpoint_notes"] += 1
+    finally:
+        source.close()
+    set_state(
+        sentinel_db,
+        "migration:codex-context:last_import",
+        json.dumps(result, sort_keys=True),
+    )
+    return result
